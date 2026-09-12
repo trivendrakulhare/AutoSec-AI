@@ -4,6 +4,7 @@ from autosec_ai.agents.state import AgentState
 from autosec_ai.tools.base import SecurityTool
 from autosec_ai.tools.echo import EchoSecurityTool
 from autosec_ai.tools.result import ToolResult
+from autosec_ai.tools.registry import ToolRegistry
 
 
 def test_project_import():
@@ -60,3 +61,24 @@ def test_tool_result():
     assert result.status == "success"
     assert result.data == {"message": "Target received"}
     assert result.error is None
+
+
+def test_tool_registry():
+    registry = ToolRegistry()
+    tool = EchoSecurityTool()
+
+    registry.register(tool)
+
+    assert registry.get("echo_security_tool") is tool
+    assert registry.list_tools() == [tool]
+
+
+def test_tool_registry_rejects_duplicate_tool_names():
+    registry = ToolRegistry()
+    first_tool = EchoSecurityTool()
+    second_tool = EchoSecurityTool()
+
+    registry.register(first_tool)
+
+    with pytest.raises(ValueError):
+        registry.register(second_tool)

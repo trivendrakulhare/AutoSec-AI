@@ -11,6 +11,11 @@ from autosec_ai.agents.orchestrator import AgentOrchestrator
 from autosec_ai.agents.planner import AgentPlanner, AgentPlanningError
 from autosec_ai.llm.client import LLMClient
 from autosec_ai.llm.mock import MockLLMClient
+from autosec_ai.llm.openai_client import (
+    OpenAIClient,
+    OpenAIConfigurationError,
+    OpenAIRequestError,
+)
 
 
 def test_project_import():
@@ -229,3 +234,75 @@ def test_agent_planner_does_not_require_tool_registry():
     planner = AgentPlanner(MockLLMClient("tool_name=echo_security_tool\ntarget=ecu.c"))
 
     assert planner.plan("Assess ECU", "ecu.c").tool_name == "echo_security_tool"
+
+
+def test_openai_client_implements_llm_client():
+    assert isinstance(OpenAIClient(sdk_client=object()), LLMClient)
+
+
+def test_openai_client_requires_api_key(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    with pytest.raises(OpenAIConfigurationError, match="OPENAI_API_KEY"):
+        OpenAIClient()
+
+
+def test_openai_client_uses_default_model(monkeypatch):
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+
+    client = OpenAIClient(sdk_client=object())
+
+    assert client.model == "gpt-5.6-luna"
+
+
+def test_openai_client_uses_environment_model(monkeypatch):
+    monkeypatch.setenv("OPENAI_MODEL", "environment-model")
+
+    client = OpenAIClient(sdk_client=object())
+
+    assert client.model == "environment-model"
+
+
+def test_openai_client_explicit_model_overrides_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_MODEL", "environment-model")
+
+    client = OpenAIClient(model="test-model", sdk_client=object())
+
+    assert client.model == "test-model"
+
+
+def test_openai_client_uses_mocked_responses_api():
+    class FakeResponses:
+        def __init__(self):
+            self.calls = []
+
+        def create(self, **kwargs):
+            self.calls.append(kwargs)
+            return type("Response", (), {"output_text": "generated text"})()
+
+    class FakeSDKClient:
+        def __init__(self):
+            self.responses = FakeResponses()
+
+    sdk_client = FakeSDKClient()
+    client = OpenAIClient(model="test-model", sdk_client=sdk_client)
+
+    assert client.generate("assess this ECU") == "generated text"
+    assert sdk_client.responses.calls == [
+        {"model": "test-model", "input": "assess this ECU"}
+    ]
+
+
+def test_openai_client_converts_sdk_failure_without_exposing_credentials():
+    class FailingResponses:
+        def create(self, **kwargs):
+            raise RuntimeError("request failed with secret-key-value")
+
+    class FakeSDKClient:
+        responses = FailingResponses()
+
+    with pytest.raises(OpenAIRequestError) as error:
+        OpenAIClient(sdk_client=FakeSDKClient()).generate("prompt")
+
+    assert str(error.value) == "OpenAI request failed."
+    assert "secret-key-value" not in str(error.value)

@@ -7,6 +7,7 @@ from autosec_ai.tools.result import ToolResult
 from autosec_ai.tools.registry import ToolRegistry
 from autosec_ai.agents.action import AgentAction
 from autosec_ai.agents.validator import ActionValidator
+from autosec_ai.agents.policy import SecurityPolicy
 from autosec_ai.agents.orchestrator import AgentOrchestrator
 from autosec_ai.agents.planner import AgentPlanner, AgentPlanningError
 from autosec_ai.llm.client import LLMClient
@@ -106,6 +107,10 @@ def test_agent_action():
 def test_action_validator_allows_registered_tool():
     registry = ToolRegistry()
     registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+    )
 
     action = AgentAction(
         tool_name="echo_security_tool",
@@ -113,7 +118,7 @@ def test_action_validator_allows_registered_tool():
     )
 
     validator = ActionValidator()
-    result = validator.validate(action, registry)
+    result = validator.validate(action, registry, policy)
 
     assert result.allowed is True
     assert result.code == "VALID"
@@ -121,6 +126,10 @@ def test_action_validator_allows_registered_tool():
 
 def test_action_validator_rejects_unknown_tool():
     registry = ToolRegistry()
+    policy = SecurityPolicy(
+        allowed_tools={"unknown_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+    )
 
     action = AgentAction(
         tool_name="unknown_tool",
@@ -128,10 +137,46 @@ def test_action_validator_rejects_unknown_tool():
     )
 
     validator = ActionValidator()
-    result = validator.validate(action, registry)
+    result = validator.validate(action, registry, policy)
 
     assert result.allowed is False
     assert result.code == "UNKNOWN_TOOL"
+
+
+def test_action_validator_rejects_unauthorized_tool():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"different_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is False
+    assert result.code == "UNAUTHORIZED_TOOL"
+
+
+def test_action_validator_rejects_unauthorized_target():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"different_target"},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is False
+    assert result.code == "UNAUTHORIZED_TARGET"
 
 
 def test_orchestrator_executes_validated_tool_and_updates_state():
@@ -142,7 +187,13 @@ def test_orchestrator_executes_validated_tool_and_updates_state():
     action = AgentAction(tool_name=tool.name, target="ecu.c")
 
     updated_state = AgentOrchestrator(
-        state, registry, ActionValidator()
+        state,
+        registry,
+        ActionValidator(),
+        SecurityPolicy(
+            allowed_tools={"echo_security_tool"},
+            allowed_targets={"ecu.c"},
+        ),
     ).execute(action)
 
     assert updated_state is state
@@ -167,7 +218,13 @@ def test_orchestrator_does_not_execute_rejected_action():
     action = AgentAction(tool_name="unknown_tool", target="ecu.c")
 
     updated_state = AgentOrchestrator(
-        state, registry, ActionValidator()
+        state,
+        registry,
+        ActionValidator(),
+        SecurityPolicy(
+            allowed_tools={"echo_security_tool"},
+            allowed_targets={"ecu.c"},
+        ),
     ).execute(action)
 
     assert tool.executions == 0
@@ -193,7 +250,15 @@ def test_orchestrator_records_tool_execution_failure():
     state = AgentState(objective="Assess ECU", target="ecu.c")
     action = AgentAction(tool_name="failing_tool", target="ecu.c")
 
-    AgentOrchestrator(state, registry, ActionValidator()).execute(action)
+    AgentOrchestrator(
+        state,
+        registry,
+        ActionValidator(),
+        SecurityPolicy(
+            allowed_tools={"failing_tool"},
+            allowed_targets={"ecu.c"},
+        ),
+    ).execute(action)
 
     assert state.observations == [
         "Tool execution failed for failing_tool: tool unavailable"

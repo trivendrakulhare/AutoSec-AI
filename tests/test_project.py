@@ -221,6 +221,36 @@ def test_orchestrator_checks_policy_before_executing_registered_tool():
     assert "Action rejected (UNAUTHORIZED_TOOL)" in updated_state.observations[0]
 
 
+def test_llm_action_with_unauthorized_target_cannot_reach_tool_execution():
+    class CountingEchoSecurityTool(EchoSecurityTool):
+        def __init__(self) -> None:
+            self.execution_count = 0
+
+        def execute(self, target: str) -> ToolResult:
+            self.execution_count += 1
+            return super().execute(target)
+
+    tool = CountingEchoSecurityTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    state = AgentState(objective="Assess ECU", target="unauthorized-ecu.c")
+    policy = SecurityPolicy(
+        allowed_tools={tool.name},
+        allowed_targets={"authorized-ecu.c"},
+    )
+    action = AgentPlanner(
+        MockLLMClient("tool_name=echo_security_tool\ntarget=unauthorized-ecu.c")
+    ).plan(state.objective, state.target)
+
+    updated_state = AgentOrchestrator(
+        state, registry, ActionValidator(), policy
+    ).execute(action)
+
+    assert "Action rejected (UNAUTHORIZED_TARGET)" in updated_state.observations[0]
+    assert tool.execution_count == 0
+    assert updated_state.actions_taken == []
+
+
 def test_orchestrator_executes_validated_tool_and_updates_state():
     registry = ToolRegistry()
     tool = EchoSecurityTool()

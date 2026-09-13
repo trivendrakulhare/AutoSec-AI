@@ -1,4 +1,5 @@
 from .action import AgentAction
+from .policy import SecurityPolicy
 from .state import AgentState
 from .validator import ActionValidator
 from ..tools.registry import ToolRegistry
@@ -12,16 +13,18 @@ class AgentOrchestrator:
         state: AgentState,
         registry: ToolRegistry,
         validator: ActionValidator,
+        policy: SecurityPolicy,
     ) -> None:
         self.state = state
         self.registry = registry
         self.validator = validator
+        self.policy = policy
 
     def execute(self, action: AgentAction) -> AgentState:
         """Validate and execute an action, returning the updated state."""
         action_record = f"{action.tool_name}:{action.target}"
 
-        validation = self.validator.validate(action, self.registry)
+        validation = self.validator.validate(action, self.registry, self.policy)
         if not validation.allowed:
             self.state.observations.append(
                 f"Action rejected ({validation.code}): {validation.reason}"

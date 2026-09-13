@@ -8,6 +8,9 @@ from autosec_ai.tools.registry import ToolRegistry
 from autosec_ai.agents.action import AgentAction
 from autosec_ai.agents.validator import ActionValidator
 from autosec_ai.agents.orchestrator import AgentOrchestrator
+from autosec_ai.agents.planner import AgentPlanner, AgentPlanningError
+from autosec_ai.llm.client import LLMClient
+from autosec_ai.llm.mock import MockLLMClient
 
 
 def test_project_import():
@@ -190,3 +193,39 @@ def test_orchestrator_records_tool_execution_failure():
     assert state.observations == [
         "Tool execution failed for failing_tool: tool unavailable"
     ]
+
+
+def test_llm_client_is_abstract():
+    with pytest.raises(TypeError):
+        LLMClient()
+
+
+def test_mock_llm_client_returns_predefined_response():
+    client = MockLLMClient("tool_name=echo_security_tool\ntarget=ecu.c")
+
+    assert client.generate("ignored prompt") == (
+        "tool_name=echo_security_tool\ntarget=ecu.c"
+    )
+
+
+def test_agent_planner_converts_valid_response_to_action():
+    planner = AgentPlanner(
+        MockLLMClient("tool_name=echo_security_tool\ntarget=ecu.c")
+    )
+
+    action = planner.plan("Assess ECU", "ecu.c")
+
+    assert action == AgentAction(tool_name="echo_security_tool", target="ecu.c")
+
+
+def test_agent_planner_rejects_malformed_response():
+    planner = AgentPlanner(MockLLMClient("tool_name=echo_security_tool"))
+
+    with pytest.raises(AgentPlanningError, match="Missing required field"):
+        planner.plan("Assess ECU", "ecu.c")
+
+
+def test_agent_planner_does_not_require_tool_registry():
+    planner = AgentPlanner(MockLLMClient("tool_name=echo_security_tool\ntarget=ecu.c"))
+
+    assert planner.plan("Assess ECU", "ecu.c").tool_name == "echo_security_tool"

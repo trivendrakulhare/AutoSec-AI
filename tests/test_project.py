@@ -179,6 +179,48 @@ def test_action_validator_rejects_unauthorized_target():
     assert result.code == "UNAUTHORIZED_TARGET"
 
 
+def test_empty_security_policy_rejects_registered_tool():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+    )
+
+    result = ActionValidator().validate(action, registry, SecurityPolicy())
+
+    assert result.allowed is False
+    assert result.code == "UNAUTHORIZED_TOOL"
+
+
+def test_orchestrator_checks_policy_before_executing_registered_tool():
+    class CountingEchoSecurityTool(EchoSecurityTool):
+        def __init__(self) -> None:
+            self.execution_count = 0
+
+        def execute(self, target: str) -> ToolResult:
+            self.execution_count += 1
+            return super().execute(target)
+
+    tool = CountingEchoSecurityTool()
+    registry = ToolRegistry()
+    registry.register(tool)
+    state = AgentState(objective="Assess ECU", target="ecu.c")
+    action = AgentAction(tool_name=tool.name, target="ecu.c")
+    policy = SecurityPolicy(
+        allowed_tools=set(),
+        allowed_targets={"ecu.c"},
+    )
+
+    updated_state = AgentOrchestrator(
+        state, registry, ActionValidator(), policy
+    ).execute(action)
+
+    assert tool.execution_count == 0
+    assert updated_state.actions_taken == []
+    assert "Action rejected (UNAUTHORIZED_TOOL)" in updated_state.observations[0]
+
+
 def test_orchestrator_executes_validated_tool_and_updates_state():
     registry = ToolRegistry()
     tool = EchoSecurityTool()

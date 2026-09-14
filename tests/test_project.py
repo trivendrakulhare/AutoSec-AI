@@ -1,6 +1,7 @@
 import pytest
 
 from autosec_ai.analyzers.finding import SecurityFinding
+from autosec_ai.analyzers.source_code import SourceCodeAnalyzer
 from autosec_ai.agents.state import AgentState
 from autosec_ai.tools.base import SecurityTool
 from autosec_ai.tools.echo import EchoSecurityTool
@@ -73,6 +74,33 @@ def test_security_finding_fields_and_nullable_values():
 
     assert nullable_finding.line is None
     assert nullable_finding.cwe is None
+
+
+def test_source_code_analyzer_interface():
+    with pytest.raises(TypeError):
+        SourceCodeAnalyzer()
+
+    class MinimalSourceCodeAnalyzer(SourceCodeAnalyzer):
+        def analyze(self, target: str) -> list[SecurityFinding]:
+            return [
+                SecurityFinding(
+                    rule_id="TEST-001",
+                    message="Test vulnerability",
+                    severity="HIGH",
+                    file=target,
+                    line=10,
+                    category="memory-safety",
+                    cwe="CWE-120",
+                    source_tool="test_scanner",
+                )
+            ]
+
+    analyzer = MinimalSourceCodeAnalyzer()
+    findings = analyzer.analyze("fixtures/ecu_vulnerable.c")
+
+    assert len(findings) == 1
+    assert isinstance(findings[0], SecurityFinding)
+    assert findings[0].file == "fixtures/ecu_vulnerable.c"
 
 
 def test_echo_security_tool():

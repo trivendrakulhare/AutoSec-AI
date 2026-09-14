@@ -34,7 +34,10 @@ class AgentOrchestrator:
         try:
             tool = self.registry.get(action.tool_name)
             self.state.actions_taken.append(action_record)
-            result = tool.execute(action.target)
+            if action.parameters:
+                result = tool.execute(action.target, action.parameters)
+            else:
+                result = tool.execute(action.target)
         except Exception as error:
             self.state.observations.append(
                 f"Tool execution failed for {action.tool_name}: {error}"

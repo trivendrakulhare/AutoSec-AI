@@ -23,6 +23,7 @@ from autosec_ai.tools.external import ExternalToolRunner
 from autosec_ai.tools.external import ExternalToolResult
 from autosec_ai.tools.result import ToolResult
 from autosec_ai.tools.registry import ToolRegistry
+from autosec_ai.tools.semgrep import SemgrepSecurityTool
 from autosec_ai.agents.action import AgentAction
 from autosec_ai.agents.validator import ActionValidator
 from autosec_ai.agents.policy import SecurityPolicy
@@ -455,6 +456,122 @@ def test_action_validator_allows_registered_tool():
 
     assert result.allowed is True
     assert result.code == "VALID"
+
+
+def test_action_validator_allows_authorized_semgrep_rule_pack():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+        allowed_parameter_values={
+            "echo_security_tool": {"rule_pack": {"automotive"}}
+        },
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+        parameters={"rule_pack": "automotive"},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is True
+    assert result.code == "VALID"
+
+
+@pytest.mark.parametrize("rule_pack", ["unknown", "../../malicious.yml", "/tmp/malicious.yml"])
+def test_action_validator_rejects_unauthorized_semgrep_rule_pack(rule_pack):
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+        allowed_parameter_values={
+            "echo_security_tool": {"rule_pack": {"automotive"}}
+        },
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+        parameters={"rule_pack": rule_pack},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is False
+    assert result.code == "UNAUTHORIZED_PARAMETER"
+
+
+def test_orchestrator_passes_authorized_rule_pack_to_semgrep_analyzer():
+    analyzer = Mock(spec=SemgrepAnalyzer)
+    analyzer.analyze.return_value = []
+    tool = SemgrepSecurityTool(analyzer)
+    registry = ToolRegistry()
+    registry.register(tool)
+    state = AgentState(objective="Assess ECU", target="ecu.c")
+    policy = SecurityPolicy(
+        allowed_tools={"semgrep"},
+        allowed_targets={"ecu.c"},
+        allowed_parameter_values={"semgrep": {"rule_pack": {"automotive"}}},
+    )
+    action = AgentAction(
+        tool_name="semgrep",
+        target="ecu.c",
+        parameters={"rule_pack": "automotive"},
+    )
+
+    AgentOrchestrator(state, registry, ActionValidator(), policy).execute(action)
+
+    analyzer.analyze.assert_called_once_with("ecu.c", "automotive")
+
+
+def test_action_validator_rejects_extra_semgrep_parameters():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"ecu.c"},
+        allowed_parameter_values={"echo_security_tool": {"rule_pack": {"automotive"}}},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="ecu.c",
+        parameters={"rule_pack": "automotive", "config": "--dangerous"},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is False
+    assert result.code == "UNAUTHORIZED_PARAMETER"
+
+
+@pytest.mark.parametrize("rule_pack", ["unknown", "../../malicious.yml", "/tmp/malicious.yml"])
+def test_rejected_rule_pack_never_reaches_semgrep_execution(rule_pack):
+    analyzer = Mock(spec=SemgrepAnalyzer)
+    analyzer.analyze.return_value = []
+    tool = SemgrepSecurityTool(analyzer)
+    registry = ToolRegistry()
+    registry.register(tool)
+    state = AgentState(objective="Assess ECU", target="ecu.c")
+    policy = SecurityPolicy(
+        allowed_tools={"semgrep"},
+        allowed_targets={"ecu.c"},
+        allowed_parameter_values={"semgrep": {"rule_pack": {"automotive"}}},
+    )
+    action = AgentAction(
+        tool_name="semgrep",
+        target="ecu.c",
+        parameters={"rule_pack": rule_pack},
+    )
+
+    updated_state = AgentOrchestrator(
+        state, registry, ActionValidator(), policy
+    ).execute(action)
+
+    assert analyzer.analyze.call_count == 0
+    assert updated_state.actions_taken == []
+    assert "Action rejected (UNAUTHORIZED_PARAMETER)" in updated_state.observations[0]
 
 
 def test_action_validator_rejects_unknown_tool():

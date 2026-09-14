@@ -1,4 +1,6 @@
 from abc import ABC, abstractmethod
+from typing import Any
+
 from .result import ToolResult
 
 
@@ -18,6 +20,8 @@ class SecurityTool(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def execute(self, target: str) -> "ToolResult":
+    def execute(
+        self, target: str, parameters: dict[str, Any] | None = None
+    ) -> "ToolResult":
         """Execute the tool against a controlled target."""
         raise NotImplementedError

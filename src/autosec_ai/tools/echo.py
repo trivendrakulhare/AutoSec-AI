@@ -1,5 +1,6 @@
 from .base import SecurityTool
 from .result import ToolResult
+from typing import Any
 
 
 class EchoSecurityTool(SecurityTool):
@@ -13,7 +14,9 @@ class EchoSecurityTool(SecurityTool):
     def description(self) -> str:
         return "Returns information about the target provided to the tool."
 
-    def execute(self, target: str) -> ToolResult:
+    def execute(
+        self, target: str, parameters: dict[str, Any] | None = None
+    ) -> ToolResult:
         return ToolResult(
             tool_name=self.name,
             target=target,

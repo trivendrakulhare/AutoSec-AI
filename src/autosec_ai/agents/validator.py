@@ -49,6 +49,39 @@ class ActionValidator:
                 reason=f"Target is not authorized: {action.target}",
             )
 
+        allowed_values = policy.allowed_parameter_values.get(action.tool_name, {})
+        if isinstance(allowed_values, dict) and allowed_values:
+            unexpected_parameters = set(action.parameters) - set(allowed_values)
+            if unexpected_parameters:
+                parameter_name = sorted(unexpected_parameters)[0]
+                return ValidationResult(
+                    allowed=False,
+                    code="UNAUTHORIZED_PARAMETER",
+                    reason=(
+                        f"Parameter is not authorized: {action.tool_name}."
+                        f"{parameter_name}"
+                    ),
+                )
+            for parameter_name, permitted_values in allowed_values.items():
+                if parameter_name not in action.parameters:
+                    return ValidationResult(
+                        allowed=False,
+                        code="MISSING_PARAMETER",
+                        reason=(
+                            f"Required parameter is missing: {action.tool_name}."
+                            f"{parameter_name}"
+                        ),
+                    )
+                if action.parameters[parameter_name] not in permitted_values:
+                    return ValidationResult(
+                        allowed=False,
+                        code="UNAUTHORIZED_PARAMETER",
+                        reason=(
+                            f"Parameter value is not authorized: {action.tool_name}."
+                            f"{parameter_name}"
+                        ),
+                    )
+
         tool_limits = policy.parameter_limits.get(action.tool_name, {})
         if isinstance(tool_limits, dict):
             for parameter_name, value in action.parameters.items():

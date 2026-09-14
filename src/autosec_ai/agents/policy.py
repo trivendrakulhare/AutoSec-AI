@@ -14,3 +14,6 @@ class SecurityPolicy:
     allowed_tools: set[str] = field(default_factory=set)
     allowed_targets: set[str] = field(default_factory=set)
     parameter_limits: dict[str, Any] = field(default_factory=dict)
+    allowed_parameter_values: dict[str, dict[str, set[Any]]] = field(
+        default_factory=dict
+    )

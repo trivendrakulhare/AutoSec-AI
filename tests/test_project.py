@@ -179,6 +179,86 @@ def test_action_validator_rejects_unauthorized_target():
     assert result.code == "UNAUTHORIZED_TARGET"
 
 
+def test_action_validator_allows_parameter_within_limit():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+        parameter_limits={"echo_security_tool": {"scan_depth": 3}},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+        parameters={"scan_depth": 2},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is True
+    assert result.code == "VALID"
+
+
+def test_action_validator_rejects_parameter_exceeding_limit():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+        parameter_limits={"echo_security_tool": {"scan_depth": 3}},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+        parameters={"scan_depth": 4},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is False
+    assert result.code == "RESOURCE_LIMIT_EXCEEDED"
+
+
+def test_action_validator_allows_parameter_without_defined_limit():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+        parameter_limits={"echo_security_tool": {"scan_depth": 3}},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+        parameters={"request_count": 1000},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is True
+    assert result.code == "VALID"
+
+
+def test_action_validator_does_not_compare_boolean_to_numeric_limit():
+    registry = ToolRegistry()
+    registry.register(EchoSecurityTool())
+    policy = SecurityPolicy(
+        allowed_tools={"echo_security_tool"},
+        allowed_targets={"fixtures/ecu_vulnerable.c"},
+        parameter_limits={"echo_security_tool": {"enabled": 0}},
+    )
+    action = AgentAction(
+        tool_name="echo_security_tool",
+        target="fixtures/ecu_vulnerable.c",
+        parameters={"enabled": True},
+    )
+
+    result = ActionValidator().validate(action, registry, policy)
+
+    assert result.allowed is True
+    assert result.code == "VALID"
+
+
 def test_empty_security_policy_rejects_registered_tool():
     registry = ToolRegistry()
     registry.register(EchoSecurityTool())

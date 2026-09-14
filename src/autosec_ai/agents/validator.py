@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from numbers import Real
 
 from .action import AgentAction
 from .policy import SecurityPolicy
@@ -47,6 +48,28 @@ class ActionValidator:
                 code="UNAUTHORIZED_TARGET",
                 reason=f"Target is not authorized: {action.target}",
             )
+
+        tool_limits = policy.parameter_limits.get(action.tool_name, {})
+        if isinstance(tool_limits, dict):
+            for parameter_name, value in action.parameters.items():
+                maximum = tool_limits.get(parameter_name)
+                if not isinstance(maximum, Real) or isinstance(maximum, bool):
+                    continue
+                if not isinstance(value, Real) or isinstance(value, bool):
+                    continue
+                try:
+                    exceeds_limit = value > maximum
+                except TypeError:
+                    continue
+                if exceeds_limit:
+                    return ValidationResult(
+                        allowed=False,
+                        code="RESOURCE_LIMIT_EXCEEDED",
+                        reason=(
+                            f"Parameter exceeds limit: {action.tool_name}."
+                            f"{parameter_name}"
+                        ),
+                    )
 
         return ValidationResult(
             allowed=True,

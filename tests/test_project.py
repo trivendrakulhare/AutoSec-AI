@@ -1,5 +1,6 @@
 import json
 import pytest
+import shutil
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -294,6 +295,34 @@ def test_semgrep_analyzer_rejects_timeout():
 
     with pytest.raises(SemgrepExecutionError, match="timed out"):
         SemgrepAnalyzer(runner).analyze("ecu.c")
+
+
+def test_repository_semgrep_rule_detects_unsafe_strcpy():
+    executable = shutil.which("semgrep")
+    if executable is None:
+        pytest.skip("semgrep executable is not installed")
+
+    result = ExternalToolRunner().run(
+        executable,
+        [
+            "scan",
+            "--config",
+            "rules/semgrep/automotive-c.yml",
+            "--json",
+            "tests/fixtures/ecu_vulnerable.c",
+        ],
+    )
+
+    assert result.return_code == 0, result.stderr
+    assert result.timed_out is False
+    findings = json.loads(result.stdout)["results"]
+    assert len(findings) == 1
+
+    finding = findings[0]
+    assert finding["check_id"].endswith("autosec-c-unsafe-strcpy")
+    assert finding["path"].endswith("tests/fixtures/ecu_vulnerable.c")
+    assert finding["start"]["line"] == 56
+    assert finding["extra"]["severity"] == "ERROR"
 
 
 def test_rule_pack_registry_resolves_registered_rule_pack():

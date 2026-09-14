@@ -1,0 +1,11 @@
+rules:
+  - id: autosec-c-unsafe-strcpy
+    languages:
+      - c
+    message: Unsafe strcpy usage
+    severity: ERROR
+    metadata:
+      category: memory-safety
+      cwe:
+        - CWE-120
+    pattern: strcpy(...)

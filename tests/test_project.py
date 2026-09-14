@@ -1,14 +1,21 @@
+import json
 import pytest
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from autosec_ai.analyzers.finding import SecurityFinding
+from autosec_ai.analyzers.semgrep import (
+    SemgrepAnalyzer,
+    SemgrepExecutionError,
+    SemgrepParsingError,
+)
 from autosec_ai.analyzers.source_code import SourceCodeAnalyzer
 from autosec_ai.agents.state import AgentState
 from autosec_ai.tools.base import SecurityTool
 from autosec_ai.tools.echo import EchoSecurityTool
 from autosec_ai.tools.external import ExternalToolRunner
+from autosec_ai.tools.external import ExternalToolResult
 from autosec_ai.tools.result import ToolResult
 from autosec_ai.tools.registry import ToolRegistry
 from autosec_ai.agents.action import AgentAction
@@ -153,6 +160,136 @@ def test_external_tool_runner_never_enables_shell():
         ExternalToolRunner().run("scanner", ["--safe"])
 
     assert run.call_args.kwargs.get("shell", False) is False
+
+
+def test_semgrep_analyzer_normalizes_two_findings():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(
+        return_code=0,
+        stdout='''{
+            "results": [
+                {
+                    "check_id": "c.security.buffer-overflow",
+                    "path": "src/ecu.c",
+                    "start": {"line": 12},
+                    "extra": {
+                        "message": "Unsafe copy",
+                        "severity": "warning",
+                        "metadata": {
+                            "category": "memory-safety",
+                            "cwe": ["CWE-120"]
+                        }
+                    }
+                },
+                {
+                    "check_id": "c.security.command-injection",
+                    "path": "src/diagnostic.c",
+                    "start": {"line": 24},
+                    "extra": {
+                        "message": "Untrusted command input",
+                        "severity": "error",
+                        "metadata": {"cwe": "CWE-78"}
+                    }
+                }
+            ]
+        }''',
+        stderr="",
+        timed_out=False,
+    )
+
+    findings = SemgrepAnalyzer(runner).analyze("fixtures/ecu_vulnerable.c")
+
+    runner.run.assert_called_once_with(
+        "semgrep",
+        ["scan", "--json", "fixtures/ecu_vulnerable.c"],
+    )
+    assert findings == [
+        SecurityFinding(
+            rule_id="c.security.buffer-overflow",
+            message="Unsafe copy",
+            severity="WARNING",
+            file="src/ecu.c",
+            line=12,
+            category="memory-safety",
+            cwe="CWE-120",
+            source_tool="semgrep",
+        ),
+        SecurityFinding(
+            rule_id="c.security.command-injection",
+            message="Untrusted command input",
+            severity="ERROR",
+            file="src/diagnostic.c",
+            line=24,
+            category="source-code",
+            cwe="CWE-78",
+            source_tool="semgrep",
+        ),
+    ]
+
+
+def test_semgrep_analyzer_normalizes_missing_cwe_to_none():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(
+        0,
+        '{"results":[{"check_id":"RULE-1","path":"ecu.c",'
+        '"start":{"line":1},"extra":{"message":"Issue",'
+        '"severity":"info","metadata":{}}}]}',
+        "",
+        False,
+    )
+
+    findings = SemgrepAnalyzer(runner).analyze("ecu.c")
+
+    assert findings[0].cwe is None
+
+
+@pytest.mark.parametrize("line", ["12", True])
+def test_semgrep_analyzer_rejects_non_integer_line_metadata(line):
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(
+        0,
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "check_id": "RULE-1",
+                        "path": "ecu.c",
+                        "start": {"line": line},
+                        "extra": {},
+                    }
+                ]
+            }
+        ),
+        "",
+        False,
+    )
+
+    with pytest.raises(SemgrepParsingError):
+        SemgrepAnalyzer(runner).analyze("ecu.c")
+
+
+def test_semgrep_analyzer_rejects_malformed_json():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(0, "not-json", "", False)
+
+    with pytest.raises(SemgrepParsingError):
+        SemgrepAnalyzer(runner).analyze("ecu.c")
+
+
+def test_semgrep_analyzer_rejects_non_zero_exit_code():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(2, "", "invalid config", False)
+
+    with pytest.raises(SemgrepExecutionError, match="2.*invalid config"):
+        SemgrepAnalyzer(runner).analyze("ecu.c")
+
+
+def test_semgrep_analyzer_rejects_timeout():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(-1, "", "", True)
+
+    with pytest.raises(SemgrepExecutionError, match="timed out"):
+        SemgrepAnalyzer(runner).analyze("ecu.c")
 
 
 def test_echo_security_tool():

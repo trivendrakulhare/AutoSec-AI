@@ -1,5 +1,6 @@
 import pytest
 
+from autosec_ai.analyzers.finding import SecurityFinding
 from autosec_ai.agents.state import AgentState
 from autosec_ai.tools.base import SecurityTool
 from autosec_ai.tools.echo import EchoSecurityTool
@@ -36,6 +37,42 @@ def test_agent_state_initialization():
     assert state.actions_taken == []
     assert state.observations == []
     assert state.findings == []
+
+
+def test_security_finding_fields_and_nullable_values():
+    finding = SecurityFinding(
+        rule_id="TEST-001",
+        message="Test vulnerability",
+        severity="HIGH",
+        file="fixtures/ecu_vulnerable.c",
+        line=10,
+        category="memory-safety",
+        cwe="CWE-120",
+        source_tool="test_scanner",
+    )
+
+    assert finding.rule_id == "TEST-001"
+    assert finding.message == "Test vulnerability"
+    assert finding.severity == "HIGH"
+    assert finding.file == "fixtures/ecu_vulnerable.c"
+    assert finding.line == 10
+    assert finding.category == "memory-safety"
+    assert finding.cwe == "CWE-120"
+    assert finding.source_tool == "test_scanner"
+
+    nullable_finding = SecurityFinding(
+        rule_id="TEST-002",
+        message="Missing optional metadata",
+        severity="LOW",
+        file="fixtures/ecu_vulnerable.c",
+        line=None,
+        category="metadata",
+        cwe=None,
+        source_tool="test_scanner",
+    )
+
+    assert nullable_finding.line is None
+    assert nullable_finding.cwe is None
 
 
 def test_echo_security_tool():

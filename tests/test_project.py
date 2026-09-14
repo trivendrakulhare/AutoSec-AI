@@ -1,10 +1,14 @@
 import pytest
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from autosec_ai.analyzers.finding import SecurityFinding
 from autosec_ai.analyzers.source_code import SourceCodeAnalyzer
 from autosec_ai.agents.state import AgentState
 from autosec_ai.tools.base import SecurityTool
 from autosec_ai.tools.echo import EchoSecurityTool
+from autosec_ai.tools.external import ExternalToolRunner
 from autosec_ai.tools.result import ToolResult
 from autosec_ai.tools.registry import ToolRegistry
 from autosec_ai.agents.action import AgentAction
@@ -101,6 +105,54 @@ def test_source_code_analyzer_interface():
     assert len(findings) == 1
     assert isinstance(findings[0], SecurityFinding)
     assert findings[0].file == "fixtures/ecu_vulnerable.c"
+
+
+def test_external_tool_runner_successful_execution():
+    completed = SimpleNamespace(returncode=0, stdout="output", stderr="warning")
+    with patch("autosec_ai.tools.external.subprocess.run", return_value=completed) as run:
+        result = ExternalToolRunner().run("scanner", ["--target", "ecu.c"], 12)
+
+    run.assert_called_once_with(
+        ["scanner", "--target", "ecu.c"],
+        capture_output=True,
+        text=True,
+        timeout=12,
+        check=False,
+    )
+    assert result.return_code == 0
+    assert result.stdout == "output"
+    assert result.stderr == "warning"
+    assert result.timed_out is False
+
+
+def test_external_tool_runner_returns_non_zero_exit_code():
+    completed = SimpleNamespace(returncode=7, stdout="", stderr="failed")
+    with patch("autosec_ai.tools.external.subprocess.run", return_value=completed):
+        result = ExternalToolRunner().run("scanner", [])
+
+    assert result.return_code == 7
+    assert result.stderr == "failed"
+    assert result.timed_out is False
+
+
+def test_external_tool_runner_handles_timeout():
+    timeout = subprocess.TimeoutExpired(["scanner"], 60, output="partial")
+    with patch(
+        "autosec_ai.tools.external.subprocess.run",
+        side_effect=timeout,
+    ):
+        result = ExternalToolRunner().run("scanner", [])
+
+    assert result.return_code == -1
+    assert result.timed_out is True
+
+
+def test_external_tool_runner_never_enables_shell():
+    completed = SimpleNamespace(returncode=0, stdout="", stderr="")
+    with patch("autosec_ai.tools.external.subprocess.run", return_value=completed) as run:
+        ExternalToolRunner().run("scanner", ["--safe"])
+
+    assert run.call_args.kwargs.get("shell", False) is False
 
 
 def test_echo_security_tool():

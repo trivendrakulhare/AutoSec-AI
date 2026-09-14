@@ -10,6 +10,10 @@ from autosec_ai.analyzers.semgrep import (
     SemgrepExecutionError,
     SemgrepParsingError,
 )
+from autosec_ai.analyzers.rule_pack import (
+    RulePackNotFoundError,
+    RulePackRegistry,
+)
 from autosec_ai.analyzers.source_code import SourceCodeAnalyzer
 from autosec_ai.agents.state import AgentState
 from autosec_ai.tools.base import SecurityTool
@@ -290,6 +294,38 @@ def test_semgrep_analyzer_rejects_timeout():
 
     with pytest.raises(SemgrepExecutionError, match="timed out"):
         SemgrepAnalyzer(runner).analyze("ecu.c")
+
+
+def test_rule_pack_registry_resolves_registered_rule_pack():
+    registry = RulePackRegistry({"automotive": "rules/automotive.yml"})
+
+    assert registry.resolve("automotive") == "rules/automotive.yml"
+
+
+def test_rule_pack_registry_rejects_unknown_rule_pack():
+    registry = RulePackRegistry({"automotive": "rules/automotive.yml"})
+
+    with pytest.raises(RulePackNotFoundError):
+        registry.resolve("unknown")
+
+
+def test_rule_pack_registry_resolves_multiple_rule_packs_independently():
+    registry = RulePackRegistry(
+        {
+            "automotive": "rules/automotive.yml",
+            "memory-safety": "rules/memory-safety.yml",
+        }
+    )
+
+    assert registry.resolve("automotive") == "rules/automotive.yml"
+    assert registry.resolve("memory-safety") == "rules/memory-safety.yml"
+
+
+def test_rule_pack_registry_does_not_resolve_unregistered_paths():
+    registry = RulePackRegistry({"automotive": "rules/automotive.yml"})
+
+    with pytest.raises(RulePackNotFoundError):
+        registry.resolve("rules/other.yml")
 
 
 def test_echo_security_tool():

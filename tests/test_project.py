@@ -6,6 +6,12 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from autosec_ai.analyzers.finding import SecurityFinding
+from autosec_ai.analyzers.finding_assessment import (
+    FindingAssessment,
+    FindingAssessmentParsingError,
+    FindingAssessor,
+    LLMFindingAssessor,
+)
 from autosec_ai.analyzers.semgrep import (
     SemgrepAnalyzer,
     SemgrepExecutionError,
@@ -91,6 +97,188 @@ def test_security_finding_fields_and_nullable_values():
 
     assert nullable_finding.line is None
     assert nullable_finding.cwe is None
+
+
+def test_finding_assessor_parses_valid_assessment():
+    client = MockLLMClient(
+        json.dumps(
+            {
+                "classification": "likely_vulnerability",
+                "confidence": "medium",
+                "rationale": "The scanner evidence indicates an unsafe copy.",
+                "impact": "An attacker may corrupt memory.",
+                "recommendations": ["Review bounds before copying input."],
+            }
+        )
+    )
+    finding = SecurityFinding(
+        "RULE-1", "Unsafe copy", "WARNING", "ecu.c", 12, "memory-safety", "CWE-120", "semgrep"
+    )
+
+    assessment = LLMFindingAssessor(client).assess(finding, "char buffer[8];")
+
+    assert assessment == FindingAssessment(
+        classification="likely_vulnerability",
+        confidence="medium",
+        rationale="The scanner evidence indicates an unsafe copy.",
+        impact="An attacker may corrupt memory.",
+        recommendations=["Review bounds before copying input."],
+    )
+
+
+@pytest.mark.parametrize(
+    "classification",
+    [
+        "confirmed_vulnerability",
+        "likely_vulnerability",
+        "needs_review",
+        "likely_false_positive",
+    ],
+)
+def test_finding_assessment_accepts_each_classification(classification):
+    assessment = FindingAssessment(
+        classification=classification,
+        confidence="low",
+        rationale="Needs analyst review.",
+        impact="Impact is uncertain.",
+        recommendations=[],
+    )
+
+    assert assessment.classification == classification
+
+
+@pytest.mark.parametrize("confidence", ["high", "medium", "low"])
+def test_finding_assessment_accepts_each_confidence(confidence):
+    assessment = FindingAssessment(
+        classification="needs_review",
+        confidence=confidence,
+        rationale="Needs analyst review.",
+        impact="Impact is uncertain.",
+        recommendations=[],
+    )
+
+    assert assessment.confidence == confidence
+
+
+def test_finding_assessor_rejects_malformed_response():
+    assessor = LLMFindingAssessor(MockLLMClient("not-json"))
+
+    with pytest.raises(FindingAssessmentParsingError):
+        assessor.assess(SecurityFinding("R", "m", "LOW", "f.c", None, "cat", None, "tool"))
+
+
+def test_finding_assessor_rejects_missing_required_field():
+    response = json.dumps(
+        {
+            "classification": "needs_review",
+            "confidence": "low",
+            "rationale": "Review needed.",
+            "impact": "Unknown.",
+        }
+    )
+
+    with pytest.raises(FindingAssessmentParsingError):
+        LLMFindingAssessor(MockLLMClient(response)).assess(
+            SecurityFinding("R", "m", "LOW", "f.c", None, "cat", None, "tool")
+        )
+
+
+def test_finding_assessor_rejects_unexpected_extra_field():
+    response = {
+        "classification": "needs_review",
+        "confidence": "low",
+        "rationale": "Review needed.",
+        "impact": "Unknown.",
+        "recommendations": [],
+        "execute_command": "rm -rf /",
+    }
+
+    with pytest.raises(FindingAssessmentParsingError):
+        LLMFindingAssessor(MockLLMClient(json.dumps(response))).assess(
+            SecurityFinding("R", "m", "LOW", "f.c", None, "cat", None, "tool")
+        )
+
+
+@pytest.mark.parametrize("recommendations", ["Review manually.", ["Review", 1]])
+def test_finding_assessor_rejects_invalid_recommendations(recommendations):
+    response = {
+        "classification": "needs_review",
+        "confidence": "low",
+        "rationale": "Review needed.",
+        "impact": "Unknown.",
+        "recommendations": recommendations,
+    }
+
+    with pytest.raises(FindingAssessmentParsingError):
+        LLMFindingAssessor(MockLLMClient(json.dumps(response))).assess(
+            SecurityFinding("R", "m", "LOW", "f.c", None, "cat", None, "tool")
+        )
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("classification", "invalid"), ("confidence", "critical")],
+)
+def test_finding_assessor_rejects_invalid_enum(field, value):
+    response = {
+        "classification": "needs_review",
+        "confidence": "low",
+        "rationale": "Review needed.",
+        "impact": "Unknown.",
+        "recommendations": [],
+    }
+    response[field] = value
+
+    with pytest.raises(FindingAssessmentParsingError):
+        LLMFindingAssessor(MockLLMClient(json.dumps(response))).assess(
+            SecurityFinding("R", "m", "LOW", "f.c", None, "cat", None, "tool")
+        )
+
+
+def test_finding_assessor_preserves_recommendations():
+    recommendations = ["Patch the input handling.", "Add a regression test."]
+    response = json.dumps(
+        {
+            "classification": "confirmed_vulnerability",
+            "confidence": "high",
+            "rationale": "Evidence is conclusive.",
+            "impact": "Memory corruption.",
+            "recommendations": recommendations,
+        }
+    )
+
+    assessment = LLMFindingAssessor(MockLLMClient(response)).assess(
+        SecurityFinding("R", "m", "HIGH", "f.c", 3, "cat", "CWE-120", "tool")
+    )
+
+    assert assessment.recommendations == recommendations
+
+
+def test_finding_assessor_prompt_includes_evidence_and_context():
+    client = MockLLMClient(
+        json.dumps(
+            {
+                "classification": "needs_review",
+                "confidence": "low",
+                "rationale": "Review needed.",
+                "impact": "Unknown.",
+                "recommendations": [],
+            }
+        )
+    )
+    finding = SecurityFinding(
+        "RULE-42", "Unsafe diagnostic input", "ERROR", "diagnostic.c", 7,
+        "input-validation", "CWE-20", "semgrep",
+    )
+
+    LLMFindingAssessor(client).assess(finding, "trusted source context")
+
+    assert client.last_prompt is not None
+    assert "OBSERVED EVIDENCE" in client.last_prompt
+    assert "RULE-42" in client.last_prompt
+    assert "Unsafe diagnostic input" in client.last_prompt
+    assert "trusted source context" in client.last_prompt
+    assert "INFERENCE" in client.last_prompt
 
 
 def test_source_code_analyzer_interface():

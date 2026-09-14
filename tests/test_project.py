@@ -169,6 +169,7 @@ def test_external_tool_runner_never_enables_shell():
 
 def test_semgrep_analyzer_normalizes_two_findings():
     runner = Mock(spec=ExternalToolRunner)
+    registry = RulePackRegistry({"automotive": "/trusted/automotive.yml"})
     runner.run.return_value = ExternalToolResult(
         return_code=0,
         stdout='''{
@@ -202,11 +203,19 @@ def test_semgrep_analyzer_normalizes_two_findings():
         timed_out=False,
     )
 
-    findings = SemgrepAnalyzer(runner).analyze("fixtures/ecu_vulnerable.c")
+    findings = SemgrepAnalyzer(runner, registry).analyze(
+        "fixtures/ecu_vulnerable.c", "automotive"
+    )
 
     runner.run.assert_called_once_with(
         "semgrep",
-        ["scan", "--json", "fixtures/ecu_vulnerable.c"],
+        [
+            "scan",
+            "--config",
+            "/trusted/automotive.yml",
+            "--json",
+            "fixtures/ecu_vulnerable.c",
+        ],
     )
     assert findings == [
         SecurityFinding(
@@ -234,6 +243,7 @@ def test_semgrep_analyzer_normalizes_two_findings():
 
 def test_semgrep_analyzer_normalizes_missing_cwe_to_none():
     runner = Mock(spec=ExternalToolRunner)
+    registry = RulePackRegistry({"automotive": "/trusted/automotive.yml"})
     runner.run.return_value = ExternalToolResult(
         0,
         '{"results":[{"check_id":"RULE-1","path":"ecu.c",'
@@ -243,7 +253,7 @@ def test_semgrep_analyzer_normalizes_missing_cwe_to_none():
         False,
     )
 
-    findings = SemgrepAnalyzer(runner).analyze("ecu.c")
+    findings = SemgrepAnalyzer(runner, registry).analyze("ecu.c", "automotive")
 
     assert findings[0].cwe is None
 
@@ -251,6 +261,7 @@ def test_semgrep_analyzer_normalizes_missing_cwe_to_none():
 @pytest.mark.parametrize("line", ["12", True])
 def test_semgrep_analyzer_rejects_non_integer_line_metadata(line):
     runner = Mock(spec=ExternalToolRunner)
+    registry = RulePackRegistry({"automotive": "/trusted/automotive.yml"})
     runner.run.return_value = ExternalToolResult(
         0,
         json.dumps(
@@ -270,31 +281,34 @@ def test_semgrep_analyzer_rejects_non_integer_line_metadata(line):
     )
 
     with pytest.raises(SemgrepParsingError):
-        SemgrepAnalyzer(runner).analyze("ecu.c")
+        SemgrepAnalyzer(runner, registry).analyze("ecu.c", "automotive")
 
 
 def test_semgrep_analyzer_rejects_malformed_json():
     runner = Mock(spec=ExternalToolRunner)
+    registry = RulePackRegistry({"automotive": "/trusted/automotive.yml"})
     runner.run.return_value = ExternalToolResult(0, "not-json", "", False)
 
     with pytest.raises(SemgrepParsingError):
-        SemgrepAnalyzer(runner).analyze("ecu.c")
+        SemgrepAnalyzer(runner, registry).analyze("ecu.c", "automotive")
 
 
 def test_semgrep_analyzer_rejects_non_zero_exit_code():
     runner = Mock(spec=ExternalToolRunner)
+    registry = RulePackRegistry({"automotive": "/trusted/automotive.yml"})
     runner.run.return_value = ExternalToolResult(2, "", "invalid config", False)
 
     with pytest.raises(SemgrepExecutionError, match="2.*invalid config"):
-        SemgrepAnalyzer(runner).analyze("ecu.c")
+        SemgrepAnalyzer(runner, registry).analyze("ecu.c", "automotive")
 
 
 def test_semgrep_analyzer_rejects_timeout():
     runner = Mock(spec=ExternalToolRunner)
+    registry = RulePackRegistry({"automotive": "/trusted/automotive.yml"})
     runner.run.return_value = ExternalToolResult(-1, "", "", True)
 
     with pytest.raises(SemgrepExecutionError, match="timed out"):
-        SemgrepAnalyzer(runner).analyze("ecu.c")
+        SemgrepAnalyzer(runner, registry).analyze("ecu.c", "automotive")
 
 
 def test_repository_semgrep_rule_detects_unsafe_strcpy():

@@ -2,6 +2,7 @@ import json
 from typing import Any
 
 from autosec_ai.analyzers.finding import SecurityFinding
+from autosec_ai.analyzers.rule_pack import RulePackRegistry
 from autosec_ai.analyzers.source_code import SourceCodeAnalyzer
 from autosec_ai.tools.external import ExternalToolRunner
 
@@ -20,14 +21,20 @@ class SemgrepAnalyzer(SourceCodeAnalyzer):
     def __init__(
         self,
         runner: ExternalToolRunner,
+        rule_pack_registry: RulePackRegistry,
         executable: str = "semgrep",
     ) -> None:
         self.runner = runner
+        self.rule_pack_registry = rule_pack_registry
         self.executable = executable
 
-    def analyze(self, target: str) -> list[SecurityFinding]:
+    def analyze(self, target: str, rule_pack: str) -> list[SecurityFinding]:
         """Run Semgrep against a target and normalize its findings."""
-        result = self.runner.run(self.executable, ["scan", "--json", target])
+        resolved_rule_pack = self.rule_pack_registry.resolve(rule_pack)
+        result = self.runner.run(
+            self.executable,
+            ["scan", "--config", resolved_rule_pack, "--json", target],
+        )
 
         if result.timed_out:
             raise SemgrepExecutionError("Semgrep execution timed out.")

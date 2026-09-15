@@ -12,6 +12,8 @@ from autosec_ai.analyzers.finding_assessment import (
     FindingAssessor,
     LLMFindingAssessor,
 )
+from autosec_ai.analyzers.binary import BinaryAnalyzer
+from autosec_ai.analyzers.binary_imports import ImportedFunctionBinaryAnalyzer
 from autosec_ai.analyzers.semgrep import (
     SemgrepAnalyzer,
     SemgrepExecutionError,
@@ -306,6 +308,111 @@ def test_source_code_analyzer_interface():
     assert len(findings) == 1
     assert isinstance(findings[0], SecurityFinding)
     assert findings[0].file == "fixtures/ecu_vulnerable.c"
+
+
+def test_binary_analyzer_interface():
+    with pytest.raises(TypeError):
+        BinaryAnalyzer()
+
+    class MinimalBinaryAnalyzer(BinaryAnalyzer):
+        def analyze(self, target: str) -> list[SecurityFinding]:
+            return [
+                SecurityFinding(
+                    rule_id="BIN-001",
+                    message="Suspicious binary pattern",
+                    severity="MEDIUM",
+                    file=target,
+                    line=None,
+                    category="binary-analysis",
+                    cwe=None,
+                    source_tool="test_binary_analyzer",
+                )
+            ]
+
+    findings = MinimalBinaryAnalyzer().analyze("fixtures/sample.bin")
+
+    assert isinstance(findings, list)
+    assert len(findings) == 1
+    assert isinstance(findings[0], SecurityFinding)
+    assert findings[0].file == "fixtures/sample.bin"
+
+
+def _compile_binary_fixture(source_name, output_path):
+    compiler = shutil.which("cc")
+    if compiler is None:
+        pytest.skip("C compiler is not installed")
+    source_path = f"tests/fixtures/{source_name}"
+    subprocess.run(
+        [compiler, "-O0", source_path, "-o", str(output_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_binary_import_analyzer_detects_strcpy_fixture(tmp_path):
+    binary_path = tmp_path / "binary_vulnerable"
+    _compile_binary_fixture("binary_vulnerable.c", binary_path)
+
+    findings = ImportedFunctionBinaryAnalyzer(ExternalToolRunner()).analyze(
+        str(binary_path)
+    )
+
+    assert len(findings) == 1
+    assert findings[0] == SecurityFinding(
+        rule_id="BIN-MEM-UNSAFE-STRCPY",
+        message=(
+            "Potentially dangerous memory-unsafe function strcpy was detected "
+            "in the binary imports."
+        ),
+        severity="MEDIUM",
+        file=str(binary_path),
+        line=None,
+        category="binary-analysis",
+        cwe="CWE-120",
+        source_tool="nm",
+    )
+
+
+def test_binary_import_analyzer_ignores_binary_without_strcpy(tmp_path):
+    binary_path = tmp_path / "binary_safe"
+    _compile_binary_fixture("binary_safe.c", binary_path)
+
+    findings = ImportedFunctionBinaryAnalyzer(ExternalToolRunner()).analyze(
+        str(binary_path)
+    )
+
+    assert findings == []
+
+
+def test_binary_import_analyzer_handles_missing_target_deterministically(tmp_path):
+    missing_path = tmp_path / "does-not-exist"
+
+    findings = ImportedFunctionBinaryAnalyzer(ExternalToolRunner()).analyze(
+        str(missing_path)
+    )
+
+    assert findings == []
+
+
+def test_binary_import_analyzer_rejects_symbol_name_prefix_false_positive():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(
+        return_code=0,
+        stdout="    _strcpy_wrapper\n",
+        stderr="",
+        timed_out=False,
+    )
+
+    findings = ImportedFunctionBinaryAnalyzer(runner).analyze("/tmp/fake-binary")
+
+    assert findings == []
+
+
+def test_binary_import_analyzer_implements_binary_analyzer():
+    analyzer = ImportedFunctionBinaryAnalyzer(ExternalToolRunner())
+
+    assert isinstance(analyzer, BinaryAnalyzer)
 
 
 def test_external_tool_runner_successful_execution():

@@ -13,7 +13,11 @@ from autosec_ai.analyzers.finding_assessment import (
     LLMFindingAssessor,
 )
 from autosec_ai.analyzers.binary import BinaryAnalyzer
-from autosec_ai.analyzers.binary_imports import ImportedFunctionBinaryAnalyzer
+from autosec_ai.analyzers.binary_imports import (
+    BinaryAnalysisEvidence,
+    ImportedFunctionBinaryAnalyzer,
+    format_binary_analysis_context,
+)
 from autosec_ai.analyzers.semgrep import (
     SemgrepAnalyzer,
     SemgrepExecutionError,
@@ -354,9 +358,8 @@ def test_binary_import_analyzer_detects_strcpy_fixture(tmp_path):
     binary_path = tmp_path / "binary_vulnerable"
     _compile_binary_fixture("binary_vulnerable.c", binary_path)
 
-    findings = ImportedFunctionBinaryAnalyzer(ExternalToolRunner()).analyze(
-        str(binary_path)
-    )
+    analyzer = ImportedFunctionBinaryAnalyzer(ExternalToolRunner())
+    findings = analyzer.analyze(str(binary_path))
 
     assert len(findings) == 1
     assert findings[0] == SecurityFinding(
@@ -372,17 +375,22 @@ def test_binary_import_analyzer_detects_strcpy_fixture(tmp_path):
         cwe="CWE-120",
         source_tool="nm",
     )
+    assert analyzer.last_evidence == BinaryAnalysisEvidence(
+        imported_symbol="___strcpy_chk",
+        analysis_tool="nm",
+        analysis_type="imported-symbol inspection",
+    )
 
 
 def test_binary_import_analyzer_ignores_binary_without_strcpy(tmp_path):
     binary_path = tmp_path / "binary_safe"
     _compile_binary_fixture("binary_safe.c", binary_path)
 
-    findings = ImportedFunctionBinaryAnalyzer(ExternalToolRunner()).analyze(
-        str(binary_path)
-    )
+    analyzer = ImportedFunctionBinaryAnalyzer(ExternalToolRunner())
+    findings = analyzer.analyze(str(binary_path))
 
     assert findings == []
+    assert analyzer.last_evidence is None
 
 
 def test_binary_import_analyzer_handles_missing_target_deterministically(tmp_path):
@@ -407,6 +415,110 @@ def test_binary_import_analyzer_rejects_symbol_name_prefix_false_positive():
     findings = ImportedFunctionBinaryAnalyzer(runner).analyze("/tmp/fake-binary")
 
     assert findings == []
+
+
+def test_binary_analysis_evidence_representation():
+    evidence = BinaryAnalysisEvidence(
+        imported_symbol="___strcpy_chk",
+        analysis_tool="nm",
+        analysis_type="imported-symbol inspection",
+    )
+
+    assert evidence.imported_symbol == "___strcpy_chk"
+    assert evidence.analysis_tool == "nm"
+    assert evidence.analysis_type == "imported-symbol inspection"
+
+
+def test_binary_import_analyzer_retains_detected_symbol_in_evidence():
+    runner = Mock(spec=ExternalToolRunner)
+    runner.run.return_value = ExternalToolResult(
+        return_code=0,
+        stdout="___strcpy_chk\n",
+        stderr="",
+        timed_out=False,
+    )
+
+    findings = ImportedFunctionBinaryAnalyzer(runner).analyze("/tmp/fake-binary")
+
+    assert len(findings) == 1
+    assert findings[0] == SecurityFinding(
+        rule_id="BIN-MEM-UNSAFE-STRCPY",
+        message=(
+            "Potentially dangerous memory-unsafe function strcpy was detected "
+            "in the binary imports."
+        ),
+        severity="MEDIUM",
+        file="/tmp/fake-binary",
+        line=None,
+        category="binary-analysis",
+        cwe="CWE-120",
+        source_tool="nm",
+    )
+
+
+def test_binary_analysis_context_contains_observed_evidence_and_limitations():
+    finding = SecurityFinding(
+        rule_id="BIN-MEM-UNSAFE-STRCPY",
+        message="Potentially dangerous memory-unsafe function strcpy was detected in the binary imports.",
+        severity="MEDIUM",
+        file="/tmp/fake-binary",
+        line=None,
+        category="binary-analysis",
+        cwe="CWE-120",
+        source_tool="nm",
+    )
+    evidence = BinaryAnalysisEvidence(
+        imported_symbol="___strcpy_chk",
+        analysis_tool="nm",
+        analysis_type="imported-symbol inspection",
+    )
+
+    context = format_binary_analysis_context(finding, evidence)
+
+    assert "OBSERVED EVIDENCE" in context
+    assert "rule_id=BIN-MEM-UNSAFE-STRCPY" in context
+    assert "___strcpy_chk" in context
+    assert "analysis_tool=nm" in context
+    assert "analysis_type=imported-symbol inspection" in context
+    assert "observed" in context.lower()
+    assert "does not establish exploitability" in context
+
+
+def test_finding_assessor_accepts_binary_analysis_context():
+    finding = SecurityFinding(
+        rule_id="BIN-MEM-UNSAFE-STRCPY",
+        message="Potentially dangerous memory-unsafe function strcpy was detected in the binary imports.",
+        severity="MEDIUM",
+        file="/tmp/fake-binary",
+        line=None,
+        category="binary-analysis",
+        cwe="CWE-120",
+        source_tool="nm",
+    )
+    evidence = BinaryAnalysisEvidence(
+        imported_symbol="___strcpy_chk",
+        analysis_tool="nm",
+        analysis_type="imported-symbol inspection",
+    )
+    client = MockLLMClient(
+        json.dumps(
+            {
+                "classification": "likely_vulnerability",
+                "confidence": "medium",
+                "rationale": "Observed binary evidence points to a dangerous import.",
+                "impact": "The binary imports a dangerous function.",
+                "recommendations": ["Review the call path and replace unsafe string handling."],
+            }
+        )
+    )
+
+    assessment = LLMFindingAssessor(client).assess(
+        finding,
+        format_binary_analysis_context(finding, evidence),
+    )
+
+    assert assessment.classification == "likely_vulnerability"
+    assert assessment.confidence == "medium"
 
 
 def test_binary_import_analyzer_implements_binary_analyzer():

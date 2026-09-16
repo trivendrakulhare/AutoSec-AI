@@ -19,6 +19,7 @@ from autosec_ai.analyzers.binary_imports import (
     ImportedFunctionBinaryAnalyzer,
     format_binary_analysis_context,
 )
+from autosec_ai.analyzers.protected_data import ProtectedDataVehicleAnalyzer
 from autosec_ai.analyzers.semgrep import (
     SemgrepAnalyzer,
     SemgrepExecutionError,
@@ -55,7 +56,10 @@ from autosec_ai.automotive import (
     READ_DATA_BY_IDENTIFIER,
     SIMULATED_VIN_IDENTIFIER,
     SIMULATED_VIN_VALUE,
+    SIMULATED_PROTECTED_IDENTIFIER,
+    SIMULATED_PROTECTED_VALUE,
     SimulatedECU,
+    DiagnosticDataPolicy,
     UDSRequest,
     UDSResponse,
     VehicleAnalysisEvidence,
@@ -266,6 +270,154 @@ def test_vehicle_analysis_evidence_rejects_invalid_analysis_type(
             response_payload=b"\x62\xf1\x90test",
             analysis_type=analysis_type,
         )
+
+
+def test_diagnostic_data_policy_is_immutable_and_validates_did_boundaries():
+    lower = DiagnosticDataPolicy(0x0000, authorization_required=False)
+    upper = DiagnosticDataPolicy(0xFFFF, authorization_required=True)
+
+    assert lower.data_identifier == 0x0000
+    assert upper.data_identifier == 0xFFFF
+    with pytest.raises(FrozenInstanceError):
+        lower.data_identifier = 0x1234
+    with pytest.raises(ValueError):
+        DiagnosticDataPolicy(-1, authorization_required=False)
+    with pytest.raises(ValueError):
+        DiagnosticDataPolicy(0x10000, authorization_required=False)
+    with pytest.raises(TypeError):
+        DiagnosticDataPolicy(True, authorization_required=False)
+
+
+def test_secure_simulator_denies_unauthenticated_protected_did():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"), policy)
+    request = UDSRequest(0x7E0, READ_DATA_BY_IDENTIFIER, b"\xf1\xa0")
+
+    response = simulator.handle_request(request)
+
+    assert response.positive is False
+    assert response.payload == b"\x7f\x22\x33"
+
+
+def test_secure_simulator_is_default_for_protected_did():
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"))
+    request = UDSRequest(0x7E0, READ_DATA_BY_IDENTIFIER, b"\xf1\xa0")
+
+    response = simulator.handle_request(request)
+
+    assert response.positive is False
+    assert response.payload == b"\x7f\x22\x33"
+
+
+def test_misconfigured_simulator_returns_only_synthetic_protected_data():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    simulator = SimulatedECU(
+        ECU(0x7E0, "Simulated ECU"),
+        policy,
+        allow_unauthenticated_protected_data=True,
+    )
+    request = UDSRequest(0x7E0, READ_DATA_BY_IDENTIFIER, b"\xf1\xa0")
+
+    response = simulator.handle_request(request)
+
+    assert response == UDSResponse(
+        target_ecu_identifier=0x7E0,
+        positive=True,
+        payload=b"\x62\xf1\xa0" + SIMULATED_PROTECTED_VALUE,
+    )
+    assert SIMULATED_PROTECTED_VALUE.startswith(b"SYNTHETIC")
+
+
+def test_secure_protected_data_analyzer_returns_no_finding_and_retains_evidence():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"), policy)
+    analyzer = ProtectedDataVehicleAnalyzer(simulator, policy)
+
+    findings = analyzer.analyze(simulator.ecu)
+
+    assert findings == []
+    assert analyzer.last_evidence == VehicleAnalysisEvidence(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        request_payload=b"\xf1\xa0",
+        response_positive=False,
+        response_payload=b"\x7f\x22\x33",
+        analysis_type="unauthenticated-protected-data-probe",
+    )
+
+
+def test_protected_data_analyzer_rejects_mismatched_simulator_policy():
+    simulator_policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    analyzer_policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, False)
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"), simulator_policy)
+
+    with pytest.raises(ValueError):
+        ProtectedDataVehicleAnalyzer(simulator, analyzer_policy)
+
+
+def test_protected_data_analyzer_rejects_inconsistent_target():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"), policy)
+    analyzer = ProtectedDataVehicleAnalyzer(simulator, policy)
+
+    with pytest.raises(ValueError):
+        analyzer.analyze(ECU(0x7E1, "Different ECU"))
+
+
+def test_protected_data_analyzer_requires_exact_synthetic_protected_response():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+
+    class UnexpectedDataSimulator:
+        def __init__(self):
+            self.ecu = ECU(0x7E0, "Simulated ECU")
+            self.protected_data_policy = policy
+
+        def handle_request(self, request):
+            return UDSResponse(
+                target_ecu_identifier=self.ecu.identifier,
+                positive=True,
+                payload=b"\x62\xf1\xa0UNEXPECTED-DATA",
+            )
+
+    analyzer = ProtectedDataVehicleAnalyzer(UnexpectedDataSimulator(), policy)
+
+    assert analyzer.analyze(analyzer.simulator.ecu) == []
+    assert analyzer.last_evidence.response_payload == b"\x62\xf1\xa0UNEXPECTED-DATA"
+
+
+def test_misconfigured_protected_data_analyzer_emits_one_deterministic_finding():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    simulator = SimulatedECU(
+        ECU(0x7E0, "Simulated ECU"),
+        policy,
+        allow_unauthenticated_protected_data=True,
+    )
+    analyzer = ProtectedDataVehicleAnalyzer(simulator, policy)
+
+    findings = analyzer.analyze(simulator.ecu)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.rule_id == "VEH-UDS-PROTECTED-DATA-UNAUTH"
+    assert finding.category == "diagnostic-access-control"
+    assert finding.source_tool == "vehicle-simulator"
+    assert finding.cwe is None
+    assert "exploit" not in finding.message.lower()
+    assert "takeover" not in finding.message.lower()
+    assert analyzer.last_evidence.response_payload == (
+        b"\x62\xf1\xa0" + SIMULATED_PROTECTED_VALUE
+    )
+
+
+def test_vehicle_analyzer_does_not_flag_normal_f190_read():
+    policy = DiagnosticDataPolicy(SIMULATED_VIN_IDENTIFIER, False)
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"), policy)
+    analyzer = ProtectedDataVehicleAnalyzer(simulator, policy)
+
+    assert analyzer.analyze(simulator.ecu) == []
+    assert analyzer.last_evidence.response_payload == (
+        b"\x62\xf1\x90" + SIMULATED_VIN_VALUE
+    )
 
 
 def test_uds_probe_records_exact_positive_request_and_response_values():

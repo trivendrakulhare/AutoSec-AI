@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import Enum
 
 from .evidence import VehicleAnalysisEvidence
 from .models import UDSRequest
@@ -6,6 +7,16 @@ from .simulator import READ_DATA_BY_IDENTIFIER, SimulatedECU
 
 
 MAX_UDS_FUZZ_CASES = 32
+
+
+class MutationType(Enum):
+    """Closed set of supported deterministic mutation classes."""
+
+    EMPTY_PAYLOAD = "empty-payload"
+    TRUNCATED_DID = "truncated-did"
+    VALID_DID = "valid-did"
+    EXTRA_BYTE = "extra-byte"
+    MAX_CLASSIC_CAN_PAYLOAD = "max-classic-can-payload"
 
 
 @dataclass(frozen=True)
@@ -47,6 +58,7 @@ class UDSFuzzCase:
     case_id: str
     service_id: int
     payload: bytes
+    mutation_type: MutationType
 
     def __post_init__(self) -> None:
         if not isinstance(self.case_id, str) or not self.case_id:
@@ -57,6 +69,8 @@ class UDSFuzzCase:
             raise ValueError("service_id must fit in one byte")
         if not isinstance(self.payload, bytes):
             raise TypeError("payload must be bytes")
+        if not isinstance(self.mutation_type, MutationType):
+            raise TypeError("mutation_type must be a MutationType")
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,7 @@ class UDSFuzzEvidence:
     response_positive: bool
     response_payload: bytes
     analysis_type: str
+    mutation_type: MutationType
 
     def __post_init__(self) -> None:
         if not isinstance(self.case_id, str) or not self.case_id:
@@ -78,17 +93,44 @@ class UDSFuzzEvidence:
             raise TypeError("analysis_type must be a string")
         if not self.analysis_type:
             raise ValueError("analysis_type must be a non-empty string")
+        if not isinstance(self.mutation_type, MutationType):
+            raise TypeError("mutation_type must be a MutationType")
 
 
 def generate_uds_fuzz_cases(config: UDSFuzzConfig) -> list[UDSFuzzCase]:
     """Generate a small fixed ordered set of malformed and boundary inputs."""
     did = config.data_identifier.to_bytes(2, byteorder="big")
     candidates = (
-        UDSFuzzCase("rdbi-empty", config.service_id, b""),
-        UDSFuzzCase("rdbi-truncated-did", config.service_id, did[:1]),
-        UDSFuzzCase("rdbi-valid-did", config.service_id, did),
-        UDSFuzzCase("rdbi-extra-byte", config.service_id, did + b"\x00"),
-        UDSFuzzCase("rdbi-eight-byte", config.service_id, did + b"\x00" * 6),
+        UDSFuzzCase(
+            "rdbi-empty",
+            config.service_id,
+            b"",
+            MutationType.EMPTY_PAYLOAD,
+        ),
+        UDSFuzzCase(
+            "rdbi-truncated-did",
+            config.service_id,
+            did[:1],
+            MutationType.TRUNCATED_DID,
+        ),
+        UDSFuzzCase(
+            "rdbi-valid-did",
+            config.service_id,
+            did,
+            MutationType.VALID_DID,
+        ),
+        UDSFuzzCase(
+            "rdbi-extra-byte",
+            config.service_id,
+            did + b"\x00",
+            MutationType.EXTRA_BYTE,
+        ),
+        UDSFuzzCase(
+            "rdbi-eight-byte",
+            config.service_id,
+            did + b"\x00" * 6,
+            MutationType.MAX_CLASSIC_CAN_PAYLOAD,
+        ),
     )
     return list(candidates[: config.max_cases])
 
@@ -118,6 +160,7 @@ class UDSFuzzer:
                     response_positive=response.positive,
                     response_payload=response.payload,
                     analysis_type="deterministic-uds-fuzz-case",
+                    mutation_type=case.mutation_type,
                 )
             )
         return evidence

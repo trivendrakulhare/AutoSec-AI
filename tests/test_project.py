@@ -19,6 +19,7 @@ from autosec_ai.analyzers.binary_imports import (
     ImportedFunctionBinaryAnalyzer,
     format_binary_analysis_context,
 )
+from autosec_ai.analyzers.fuzz_response import UDSFuzzResponseAnalyzer
 from autosec_ai.analyzers.protected_data import ProtectedDataVehicleAnalyzer
 from autosec_ai.analyzers.semgrep import (
     SemgrepAnalyzer,
@@ -53,6 +54,7 @@ from autosec_ai.llm.openai_client import (
 from autosec_ai.automotive import (
     CANMessage,
     ECU,
+    MutationType,
     READ_DATA_BY_IDENTIFIER,
     SIMULATED_VIN_IDENTIFIER,
     SIMULATED_VIN_VALUE,
@@ -459,14 +461,59 @@ def test_uds_fuzz_config_is_immutable_and_bounded():
 
 
 def test_uds_fuzz_case_is_immutable_and_validated():
-    case = UDSFuzzCase("case-1", service_id=0x22, payload=b"\xf1\x90")
+    case = UDSFuzzCase(
+        "case-1",
+        service_id=0x22,
+        payload=b"\xf1\x90",
+        mutation_type=MutationType.VALID_DID,
+    )
 
     with pytest.raises(FrozenInstanceError):
         case.payload = b""
     with pytest.raises(ValueError):
-        UDSFuzzCase("", service_id=0x22, payload=b"")
+        UDSFuzzCase(
+            "",
+            service_id=0x22,
+            payload=b"",
+            mutation_type=MutationType.EMPTY_PAYLOAD,
+        )
     with pytest.raises(TypeError):
-        UDSFuzzCase("case-1", service_id=0x22, payload=bytearray())
+        UDSFuzzCase(
+            "case-1",
+            service_id=0x22,
+            payload=bytearray(),
+            mutation_type=MutationType.EMPTY_PAYLOAD,
+        )
+
+
+def test_uds_fuzz_mutation_type_is_closed_and_traceable():
+    valid = UDSFuzzCase(
+        "case-1",
+        service_id=0x22,
+        payload=b"\xf1\x90",
+        mutation_type=MutationType.VALID_DID,
+    )
+    evidence = UDSFuzzEvidence(
+        case_id="case-1",
+        target_ecu_identifier=0x7E0,
+        request_service_id=0x22,
+        request_payload=b"\xf1\x90",
+        response_positive=True,
+        response_payload=b"\x62\xf1\x90test",
+        analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.VALID_DID,
+    )
+
+    assert valid.mutation_type is MutationType.VALID_DID
+    assert evidence.mutation_type is MutationType.VALID_DID
+
+    with pytest.raises(TypeError):
+        UDSFuzzCase(
+            "case-2",
+            service_id=0x22,
+            payload=b"\xf1\x90",
+            mutation_type="not-a-mutation",
+        )
 
 
 def test_uds_fuzz_case_generation_is_deterministic_and_bounded():
@@ -494,6 +541,7 @@ def test_uds_fuzz_evidence_is_immutable_and_observation_only():
         response_positive=True,
         response_payload=b"\x62\xf1\x90test",
         analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.VALID_DID,
     )
 
     with pytest.raises(FrozenInstanceError):
@@ -535,6 +583,13 @@ def test_uds_fuzzer_executes_once_per_case_and_returns_observations_only():
         "rdbi-extra-byte",
         "rdbi-eight-byte",
     ]
+    assert [item.mutation_type for item in evidence] == [
+        MutationType.EMPTY_PAYLOAD,
+        MutationType.TRUNCATED_DID,
+        MutationType.VALID_DID,
+        MutationType.EXTRA_BYTE,
+        MutationType.MAX_CLASSIC_CAN_PAYLOAD,
+    ]
 
 
 def test_uds_fuzzer_records_exact_f190_observations_and_negative_responses():
@@ -569,6 +624,106 @@ def test_uds_fuzzer_secure_protected_did_remains_denied():
     assert evidence[2].request_payload == b"\xf1\xa0"
     assert evidence[2].response_positive is False
     assert evidence[2].response_payload == b"\x7f\x22\x33"
+
+
+def test_uds_fuzz_response_analyzer_generates_only_exact_protected_data_findings():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    analyzer = UDSFuzzResponseAnalyzer(policy)
+    evidence = [
+        UDSFuzzEvidence(
+            case_id="rdbi-valid-did",
+            target_ecu_identifier=0x7E0,
+            request_service_id=READ_DATA_BY_IDENTIFIER,
+            request_payload=policy.data_identifier.to_bytes(2, byteorder="big"),
+            response_positive=True,
+            response_payload=bytes([READ_DATA_BY_IDENTIFIER + 0x40])
+            + policy.data_identifier.to_bytes(2, byteorder="big")
+            + SIMULATED_PROTECTED_VALUE,
+            analysis_type="deterministic-uds-fuzz-case",
+            mutation_type=MutationType.VALID_DID,
+        )
+    ]
+
+    findings = analyzer.analyze(evidence)
+    assert len(findings) == 1
+    assert findings[0].rule_id == "VEH-UDS-PROTECTED-DATA-UNAUTH"
+
+    analyzer2 = UDSFuzzResponseAnalyzer(policy)
+    wrong_did = evidence[0].__class__(
+        case_id="rdbi-valid-did",
+        target_ecu_identifier=0x7E0,
+        request_service_id=READ_DATA_BY_IDENTIFIER,
+        request_payload=b"\xf1\x91",
+        response_positive=True,
+        response_payload=bytes([READ_DATA_BY_IDENTIFIER + 0x40])
+        + b"\xf1\x91"
+        + SIMULATED_PROTECTED_VALUE,
+        analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.VALID_DID,
+    )
+    assert analyzer2.analyze([wrong_did]) == []
+
+    wrong_value = evidence[0].__class__(
+        case_id="rdbi-valid-did",
+        target_ecu_identifier=0x7E0,
+        request_service_id=READ_DATA_BY_IDENTIFIER,
+        request_payload=policy.data_identifier.to_bytes(2, byteorder="big"),
+        response_positive=True,
+        response_payload=bytes([READ_DATA_BY_IDENTIFIER + 0x40])
+        + policy.data_identifier.to_bytes(2, byteorder="big")
+        + b"WRONG-VALUE",
+        analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.VALID_DID,
+    )
+    assert analyzer2.analyze([wrong_value]) == []
+
+    negative = evidence[0].__class__(
+        case_id="rdbi-valid-did",
+        target_ecu_identifier=0x7E0,
+        request_service_id=READ_DATA_BY_IDENTIFIER,
+        request_payload=policy.data_identifier.to_bytes(2, byteorder="big"),
+        response_positive=False,
+        response_payload=b"\x7f\x22\x33",
+        analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.VALID_DID,
+    )
+    assert analyzer2.analyze([negative]) == []
+
+    non_valid_mutation = evidence[0].__class__(
+        case_id="rdbi-valid-did",
+        target_ecu_identifier=0x7E0,
+        request_service_id=READ_DATA_BY_IDENTIFIER,
+        request_payload=policy.data_identifier.to_bytes(2, byteorder="big"),
+        response_positive=True,
+        response_payload=bytes([READ_DATA_BY_IDENTIFIER + 0x40])
+        + policy.data_identifier.to_bytes(2, byteorder="big")
+        + SIMULATED_PROTECTED_VALUE,
+        analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.EXTRA_BYTE,
+    )
+    assert analyzer2.analyze([non_valid_mutation]) == []
+
+    alternate_ecu = evidence[0].__class__(
+        case_id="rdbi-valid-did",
+        target_ecu_identifier=0x7E1,
+        request_service_id=READ_DATA_BY_IDENTIFIER,
+        request_payload=policy.data_identifier.to_bytes(2, byteorder="big"),
+        response_positive=True,
+        response_payload=bytes([READ_DATA_BY_IDENTIFIER + 0x40])
+        + policy.data_identifier.to_bytes(2, byteorder="big")
+        + SIMULATED_PROTECTED_VALUE,
+        analysis_type="deterministic-uds-fuzz-case",
+        mutation_type=MutationType.VALID_DID,
+    )
+    assert analyzer2.analyze([alternate_ecu]) == [findings[0]]
+
+    no_policy = UDSFuzzResponseAnalyzer(
+        DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, False)
+    )
+    assert no_policy.analyze(evidence) == []
+
+    with pytest.raises(TypeError):
+        UDSFuzzResponseAnalyzer(policy, expected_protected_value="bad")
 
 
 def test_uds_probe_records_exact_positive_request_and_response_values():

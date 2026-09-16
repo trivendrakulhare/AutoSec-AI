@@ -1,6 +1,7 @@
 from .evidence import VehicleAnalysisEvidence
 from .fuzzing import (
 	MAX_UDS_FUZZ_CASES,
+	MutationType,
 	UDSFuzzCase,
 	UDSFuzzConfig,
 	UDSFuzzEvidence,
@@ -24,6 +25,7 @@ __all__ = [
 	"DiagnosticDataPolicy",
 	"ECU",
 	"MAX_UDS_FUZZ_CASES",
+	"MutationType",
 	"READ_DATA_BY_IDENTIFIER",
 	"SIMULATED_VIN_IDENTIFIER",
 	"SIMULATED_VIN_VALUE",

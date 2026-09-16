@@ -2,6 +2,7 @@ import json
 import pytest
 import shutil
 import subprocess
+from dataclasses import FrozenInstanceError
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -48,12 +49,175 @@ from autosec_ai.llm.openai_client import (
     OpenAIConfigurationError,
     OpenAIRequestError,
 )
+from autosec_ai.automotive import (
+    CANMessage,
+    ECU,
+    READ_DATA_BY_IDENTIFIER,
+    SIMULATED_VIN_IDENTIFIER,
+    SIMULATED_VIN_VALUE,
+    SimulatedECU,
+    UDSRequest,
+    UDSResponse,
+)
 
 
 def test_project_import():
     import autosec_ai
 
     assert autosec_ai.__name__ == "autosec_ai"
+
+
+def test_valid_ecu_and_invalid_ecu_identifier():
+    ecu = ECU(identifier=0x7E0, name="Simulated Engine ECU")
+
+    assert ecu.identifier == 0x7E0
+    assert ecu.name == "Simulated Engine ECU"
+    with pytest.raises(TypeError):
+        ECU(identifier=True, name="Invalid ECU")
+    with pytest.raises(ValueError):
+        ECU(identifier=0x800, name="Invalid ECU")
+    with pytest.raises(TypeError):
+        ECU(identifier="0x7E0", name="Invalid ECU")
+
+
+def test_can_message_validates_standard_id_and_classic_payload():
+    assert CANMessage(arbitration_id=0x000, payload=b"").payload == b""
+    assert CANMessage(arbitration_id=0x7FF, payload=b"12345678").arbitration_id == 0x7FF
+
+    with pytest.raises(ValueError):
+        CANMessage(arbitration_id=-1, payload=b"")
+    with pytest.raises(ValueError):
+        CANMessage(arbitration_id=0x800, payload=b"")
+    with pytest.raises(ValueError):
+        CANMessage(arbitration_id=0x100, payload=b"123456789")
+    with pytest.raises(TypeError):
+        CANMessage(arbitration_id=True, payload=b"")
+    with pytest.raises(TypeError):
+        CANMessage(arbitration_id=0x100, payload=bytearray(b"data"))
+
+
+def test_uds_request_validates_service_id_and_payload():
+    request = UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=SIMULATED_VIN_IDENTIFIER.to_bytes(2, byteorder="big"),
+    )
+
+    assert request.target_ecu_identifier == 0x7E0
+    assert request.service_id == 0x22
+    with pytest.raises(ValueError):
+        UDSRequest(target_ecu_identifier=0x7E0, service_id=0x100, payload=b"")
+    with pytest.raises(TypeError):
+        UDSRequest(target_ecu_identifier=0x7E0, service_id=True, payload=b"")
+    with pytest.raises(TypeError):
+        UDSRequest(target_ecu_identifier=0x7E0, service_id="0x22", payload=b"")
+    with pytest.raises(TypeError):
+        UDSRequest(target_ecu_identifier=0x7E0, service_id=0x22, payload=bytearray())
+
+
+def test_automotive_value_objects_are_immutable():
+    ecu = ECU(identifier=0x7E0, name="Simulated ECU")
+    message = CANMessage(arbitration_id=0x100, payload=b"data")
+    request = UDSRequest(target_ecu_identifier=0x7E0, service_id=0x22, payload=b"")
+    response = UDSResponse(target_ecu_identifier=0x7E0, positive=True, payload=b"ok")
+
+    for value_object, field in (
+        (ecu, "name"),
+        (message, "payload"),
+        (request, "service_id"),
+        (response, "positive"),
+    ):
+        with pytest.raises(FrozenInstanceError):
+            setattr(value_object, field, None)
+
+
+def test_uds_response_rejects_non_boolean_positive_value():
+    with pytest.raises(TypeError):
+        UDSResponse(target_ecu_identifier=0x7E0, positive=1, payload=b"")
+
+
+def test_uds_response_rejects_non_bytes_payload():
+    with pytest.raises(TypeError):
+        UDSResponse(target_ecu_identifier=0x7E0, positive=True, payload=bytearray())
+
+
+def test_simulated_ecu_returns_deterministic_positive_read_data_response():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=SIMULATED_VIN_IDENTIFIER.to_bytes(2, byteorder="big"),
+    )
+
+    response = simulator.handle_request(request)
+
+    assert response == UDSResponse(
+        target_ecu_identifier=0x7E0,
+        positive=True,
+        payload=b"\x62\xf1\x90" + SIMULATED_VIN_VALUE,
+    )
+
+
+@pytest.mark.parametrize("payload", [b"", b"\xf1", b"\xf1\x90\x00"])
+def test_simulated_ecu_rejects_invalid_read_data_by_identifier_length(payload):
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=payload,
+    )
+
+    response = simulator.handle_request(request)
+
+    assert response.positive is False
+    assert response.payload == b"\x7f\x22\x13"
+
+
+def test_simulated_ecu_rejects_unsupported_service_deterministically():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(target_ecu_identifier=0x7E0, service_id=0x10, payload=b"")
+
+    response = simulator.handle_request(request)
+
+    assert response == UDSResponse(
+        target_ecu_identifier=0x7E0,
+        positive=False,
+        payload=b"\x7f\x10\x11",
+    )
+
+
+def test_simulated_ecu_rejects_unsupported_data_identifier_deterministically():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=b"\xf1\x91",
+    )
+
+    response = simulator.handle_request(request)
+
+    assert response == UDSResponse(
+        target_ecu_identifier=0x7E0,
+        positive=False,
+        payload=b"\x7f\x22\x31",
+    )
+
+
+def test_simulated_ecu_rejects_request_for_another_ecu_deterministically():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E1,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=SIMULATED_VIN_IDENTIFIER.to_bytes(2, byteorder="big"),
+    )
+
+    response = simulator.handle_request(request)
+
+    assert response == UDSResponse(
+        target_ecu_identifier=0x7E0,
+        positive=False,
+        payload=b"\x7f\x22\x31",
+    )
 
 
 def test_agent_state_initialization():

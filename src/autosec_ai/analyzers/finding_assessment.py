@@ -5,6 +5,7 @@ from typing import Any
 
 from autosec_ai.llm.client import LLMClient
 
+from .context import FindingContext, format_finding_context
 from .finding import SecurityFinding
 
 
@@ -82,6 +83,13 @@ class LLMFindingAssessor(FindingAssessor):
         self, finding: SecurityFinding, context: str | None = None
     ) -> FindingAssessment:
         response = self.llm_client.generate(self._build_prompt(finding, context))
+        return self._parse_response(response)
+
+    def assess_context(self, context: FindingContext) -> FindingAssessment:
+        response = self.llm_client.generate(format_finding_context(context))
+        return self._parse_response(response)
+
+    def _parse_response(self, response: str) -> FindingAssessment:
         try:
             payload = json.loads(response)
             if not isinstance(payload, dict):

@@ -60,9 +60,15 @@ from autosec_ai.automotive import (
     SIMULATED_PROTECTED_VALUE,
     SimulatedECU,
     DiagnosticDataPolicy,
+    MAX_UDS_FUZZ_CASES,
+    UDSFuzzCase,
+    UDSFuzzConfig,
+    UDSFuzzEvidence,
+    UDSFuzzer,
     UDSRequest,
     UDSResponse,
     VehicleAnalysisEvidence,
+    generate_uds_fuzz_cases,
     perform_uds_probe,
 )
 from autosec_ai.analyzers.vehicle import VehicleAnalyzer
@@ -418,6 +424,151 @@ def test_vehicle_analyzer_does_not_flag_normal_f190_read():
     assert analyzer.last_evidence.response_payload == (
         b"\x62\xf1\x90" + SIMULATED_VIN_VALUE
     )
+
+
+def test_uds_fuzz_config_is_immutable_and_bounded():
+    config = UDSFuzzConfig(service_id=0x22, data_identifier=0xF190, max_cases=5)
+
+    assert config.service_id == READ_DATA_BY_IDENTIFIER
+    with pytest.raises(FrozenInstanceError):
+        config.max_cases = 1
+    with pytest.raises(ValueError, match="ReadDataByIdentifier"):
+        UDSFuzzConfig(service_id=0x10, data_identifier=0xF190, max_cases=1)
+    with pytest.raises(ValueError):
+        UDSFuzzConfig(service_id=-1, data_identifier=0xF190, max_cases=1)
+    with pytest.raises(ValueError):
+        UDSFuzzConfig(service_id=0x100, data_identifier=0xF190, max_cases=1)
+    with pytest.raises(TypeError):
+        UDSFuzzConfig(service_id=True, data_identifier=0xF190, max_cases=1)
+    with pytest.raises(ValueError):
+        UDSFuzzConfig(service_id=0x22, data_identifier=-1, max_cases=1)
+    with pytest.raises(ValueError):
+        UDSFuzzConfig(service_id=0x22, data_identifier=0x10000, max_cases=1)
+    with pytest.raises(TypeError):
+        UDSFuzzConfig(service_id=0x22, data_identifier=True, max_cases=1)
+    with pytest.raises(ValueError):
+        UDSFuzzConfig(service_id=0x22, data_identifier=0xF190, max_cases=0)
+    with pytest.raises(TypeError):
+        UDSFuzzConfig(service_id=0x22, data_identifier=0xF190, max_cases=True)
+    with pytest.raises(ValueError):
+        UDSFuzzConfig(
+            service_id=0x22,
+            data_identifier=0xF190,
+            max_cases=MAX_UDS_FUZZ_CASES + 1,
+        )
+
+
+def test_uds_fuzz_case_is_immutable_and_validated():
+    case = UDSFuzzCase("case-1", service_id=0x22, payload=b"\xf1\x90")
+
+    with pytest.raises(FrozenInstanceError):
+        case.payload = b""
+    with pytest.raises(ValueError):
+        UDSFuzzCase("", service_id=0x22, payload=b"")
+    with pytest.raises(TypeError):
+        UDSFuzzCase("case-1", service_id=0x22, payload=bytearray())
+
+
+def test_uds_fuzz_case_generation_is_deterministic_and_bounded():
+    config = UDSFuzzConfig(service_id=0x22, data_identifier=0xF190, max_cases=3)
+
+    first = generate_uds_fuzz_cases(config)
+    second = generate_uds_fuzz_cases(config)
+
+    assert first == second
+    assert [case.case_id for case in first] == [
+        "rdbi-empty",
+        "rdbi-truncated-did",
+        "rdbi-valid-did",
+    ]
+    assert len(first) <= config.max_cases
+    assert len({case.case_id for case in first}) == len(first)
+
+
+def test_uds_fuzz_evidence_is_immutable_and_observation_only():
+    evidence = UDSFuzzEvidence(
+        case_id="rdbi-valid-did",
+        target_ecu_identifier=0x7E0,
+        request_service_id=0x22,
+        request_payload=b"\xf1\x90",
+        response_positive=True,
+        response_payload=b"\x62\xf1\x90test",
+        analysis_type="deterministic-uds-fuzz-case",
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        evidence.response_positive = False
+    assert not {
+        "vulnerable",
+        "exploitable",
+        "crash",
+        "attack_successful",
+        "severity",
+        "risk_score",
+        "cwe",
+        "ai_interpretation",
+    }.intersection(evidence.__dataclass_fields__)
+
+
+def test_uds_fuzzer_executes_once_per_case_and_returns_observations_only():
+    class CountingSimulator(SimulatedECU):
+        def __init__(self, ecu):
+            super().__init__(ecu)
+            self.call_count = 0
+
+        def handle_request(self, request):
+            self.call_count += 1
+            return super().handle_request(request)
+
+    simulator = CountingSimulator(ECU(0x7E0, "Simulated ECU"))
+    config = UDSFuzzConfig(service_id=0x22, data_identifier=0xF190, max_cases=5)
+
+    evidence = UDSFuzzer(simulator, config).run()
+
+    assert simulator.call_count == len(evidence) == 5
+    assert all(isinstance(item, UDSFuzzEvidence) for item in evidence)
+    assert all(not isinstance(item, SecurityFinding) for item in evidence)
+    assert [item.case_id for item in evidence] == [
+        "rdbi-empty",
+        "rdbi-truncated-did",
+        "rdbi-valid-did",
+        "rdbi-extra-byte",
+        "rdbi-eight-byte",
+    ]
+
+
+def test_uds_fuzzer_records_exact_f190_observations_and_negative_responses():
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"))
+    config = UDSFuzzConfig(service_id=0x22, data_identifier=0xF190, max_cases=5)
+
+    evidence = UDSFuzzer(simulator, config).run()
+
+    assert evidence[0].request_payload == b""
+    assert evidence[0].response_positive is False
+    assert evidence[0].response_payload == b"\x7f\x22\x13"
+    assert evidence[1].request_payload == b"\xf1"
+    assert evidence[1].response_payload == b"\x7f\x22\x13"
+    assert evidence[2].request_payload == b"\xf1\x90"
+    assert evidence[2].response_positive is True
+    assert evidence[2].response_payload == b"\x62\xf1\x90" + SIMULATED_VIN_VALUE
+    assert evidence[3].response_payload == b"\x7f\x22\x13"
+    assert evidence[4].response_payload == b"\x7f\x22\x13"
+
+
+def test_uds_fuzzer_secure_protected_did_remains_denied():
+    policy = DiagnosticDataPolicy(SIMULATED_PROTECTED_IDENTIFIER, True)
+    simulator = SimulatedECU(ECU(0x7E0, "Simulated ECU"), policy)
+    config = UDSFuzzConfig(
+        service_id=0x22,
+        data_identifier=SIMULATED_PROTECTED_IDENTIFIER,
+        max_cases=3,
+    )
+
+    evidence = UDSFuzzer(simulator, config).run()
+
+    assert evidence[2].request_payload == b"\xf1\xa0"
+    assert evidence[2].response_positive is False
+    assert evidence[2].response_payload == b"\x7f\x22\x33"
 
 
 def test_uds_probe_records_exact_positive_request_and_response_values():

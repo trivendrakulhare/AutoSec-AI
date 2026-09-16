@@ -58,7 +58,10 @@ from autosec_ai.automotive import (
     SimulatedECU,
     UDSRequest,
     UDSResponse,
+    VehicleAnalysisEvidence,
+    perform_uds_probe,
 )
+from autosec_ai.analyzers.vehicle import VehicleAnalyzer
 
 
 def test_project_import():
@@ -218,6 +221,117 @@ def test_simulated_ecu_rejects_request_for_another_ecu_deterministically():
         positive=False,
         payload=b"\x7f\x22\x31",
     )
+
+
+def test_vehicle_analyzer_is_independent_and_returns_security_findings():
+    assert not issubclass(VehicleAnalyzer, BinaryAnalyzer)
+    assert not issubclass(VehicleAnalyzer, SourceCodeAnalyzer)
+    assert VehicleAnalyzer.__abstractmethods__ == {"analyze"}
+
+
+def test_vehicle_analysis_evidence_is_immutable_and_observation_only():
+    evidence = VehicleAnalysisEvidence(
+        target_ecu_identifier=0x7E0,
+        service_id=0x22,
+        request_payload=b"\xf1\x90",
+        response_positive=True,
+        response_payload=b"\x62\xf1\x90test",
+        analysis_type="single-uds-probe",
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        evidence.service_id = 0x10
+    assert not {
+        "vulnerable",
+        "exploitable",
+        "attack_successful",
+        "risk_score",
+        "criticality",
+    }.intersection(evidence.__dataclass_fields__)
+
+
+@pytest.mark.parametrize(
+    ("analysis_type", "error_type"),
+    [(None, TypeError), (123, TypeError), ("", ValueError)],
+)
+def test_vehicle_analysis_evidence_rejects_invalid_analysis_type(
+    analysis_type, error_type
+):
+    with pytest.raises(error_type):
+        VehicleAnalysisEvidence(
+            target_ecu_identifier=0x7E0,
+            service_id=0x22,
+            request_payload=b"\xf1\x90",
+            response_positive=True,
+            response_payload=b"\x62\xf1\x90test",
+            analysis_type=analysis_type,
+        )
+
+
+def test_uds_probe_records_exact_positive_request_and_response_values():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=SIMULATED_VIN_IDENTIFIER.to_bytes(2, byteorder="big"),
+    )
+
+    evidence = perform_uds_probe(simulator, request)
+
+    assert evidence == VehicleAnalysisEvidence(
+        target_ecu_identifier=0x7E0,
+        service_id=0x22,
+        request_payload=b"\xf1\x90",
+        response_positive=True,
+        response_payload=b"\x62\xf1\x90" + SIMULATED_VIN_VALUE,
+        analysis_type="single-uds-probe",
+    )
+
+
+def test_uds_probe_records_deterministic_negative_response():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(target_ecu_identifier=0x7E0, service_id=0x10, payload=b"")
+
+    evidence = perform_uds_probe(simulator, request, "unsupported-service-probe")
+
+    assert evidence.target_ecu_identifier == 0x7E0
+    assert evidence.service_id == 0x10
+    assert evidence.request_payload == b""
+    assert evidence.response_positive is False
+    assert evidence.response_payload == b"\x7f\x10\x11"
+    assert evidence.analysis_type == "unsupported-service-probe"
+
+
+def test_uds_probe_does_not_alter_request_object():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=b"\xf1\x90",
+    )
+
+    perform_uds_probe(simulator, request)
+
+    assert request == UDSRequest(
+        target_ecu_identifier=0x7E0,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=b"\xf1\x90",
+    )
+
+
+def test_uds_probe_records_actual_response_for_wrong_ecu_target():
+    simulator = SimulatedECU(ECU(identifier=0x7E0, name="Simulated ECU"))
+    request = UDSRequest(
+        target_ecu_identifier=0x7E1,
+        service_id=READ_DATA_BY_IDENTIFIER,
+        payload=b"\xf1\x90",
+    )
+
+    evidence = perform_uds_probe(simulator, request)
+
+    assert evidence.target_ecu_identifier == 0x7E1
+    assert evidence.response_positive is False
+    assert evidence.response_payload == b"\x7f\x22\x31"
 
 
 def test_agent_state_initialization():

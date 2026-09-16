@@ -1,4 +1,6 @@
+from .evidence import VehicleAnalysisEvidence
 from .models import CANMessage, ECU, UDSRequest, UDSResponse
+from .probe import perform_uds_probe
 from .simulator import (
 	READ_DATA_BY_IDENTIFIER,
 	SIMULATED_VIN_IDENTIFIER,
@@ -15,4 +17,6 @@ __all__ = [
 	"SimulatedECU",
 	"UDSRequest",
 	"UDSResponse",
+	"VehicleAnalysisEvidence",
+	"perform_uds_probe",
 ]

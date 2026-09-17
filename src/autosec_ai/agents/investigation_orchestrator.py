@@ -45,6 +45,7 @@ class InvestigationOrchestrator:
                 step_number=len(state.steps) + 1,
                 proposed_action=action,
                 validation_status=validation.code,
+                validation_allowed=validation.allowed,
             )
             return append_investigation_step(state, step)
 
@@ -54,6 +55,7 @@ class InvestigationOrchestrator:
             step_number=len(state.steps) + 1,
             proposed_action=action,
             validation_status=validation.code,
+            validation_allowed=validation.allowed,
             tool_result=result,
         )
         return append_investigation_step(state, step)

@@ -16,6 +16,7 @@ class InvestigationStep:
     step_number: int
     proposed_action: AgentAction
     validation_status: str
+    validation_allowed: bool
     tool_result: ToolResult | None = None
     finding_context: FindingContext | None = None
     assessment: FindingAssessment | None = None
@@ -29,6 +30,8 @@ class InvestigationStep:
             raise TypeError("proposed_action must be an AgentAction")
         if not isinstance(self.validation_status, str) or not self.validation_status:
             raise ValueError("validation_status must be a non-empty string")
+        if not isinstance(self.validation_allowed, bool):
+            raise TypeError("validation_allowed must be a bool")
         if self.tool_result is not None and not isinstance(self.tool_result, ToolResult):
             raise TypeError("tool_result must be a ToolResult or None")
         if self.finding_context is not None and not isinstance(

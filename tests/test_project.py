@@ -71,6 +71,7 @@ from autosec_ai.agents.bounded_investigation import (
     InvestigationTerminationReason,
 )
 from autosec_ai.agents.planner import AgentPlanner, AgentPlanningError
+from autosec_ai.cli import main as cli_main
 from autosec_ai.llm.client import LLMClient
 from autosec_ai.llm.mock import MockLLMClient
 from autosec_ai.llm.openai_client import (
@@ -99,6 +100,15 @@ from autosec_ai.automotive import (
     VehicleAnalysisEvidence,
     generate_uds_fuzz_cases,
     perform_uds_probe,
+)
+from autosec_ai.reporting.investigation import (
+    InvestigationAssessmentReport,
+    InvestigationFindingReport,
+    InvestigationReport,
+    InvestigationStepReport,
+    build_investigation_report,
+    format_investigation_report,
+    format_investigation_report_json,
 )
 from autosec_ai.analyzers.vehicle import VehicleAnalyzer
 
@@ -3450,6 +3460,248 @@ def test_openai_client_uses_default_model(monkeypatch):
     client = OpenAIClient(sdk_client=object())
 
     assert client.model == "gpt-5.6-luna"
+
+
+def test_investigation_report_builder_preserves_minimal_result():
+    state = InvestigationState("Assess ECU", "ecu.c")
+    result = InvestigationRunResult(
+        state, InvestigationTerminationReason.MAX_STEPS_REACHED
+    )
+
+    report = build_investigation_report(result)
+
+    assert report == InvestigationReport(
+        objective="Assess ECU",
+        target="ecu.c",
+        termination_reason=InvestigationTerminationReason.MAX_STEPS_REACHED,
+        total_steps=0,
+        steps=(),
+    )
+    assert state.steps == ()
+
+
+def test_investigation_report_builder_maps_step_finding_and_assessment():
+    finding_context = _investigation_finding_context()
+    assessment = _investigation_assessment()
+    action = AgentAction(
+        "echo_security_tool", "ecu.c", {"message_rate": 100, "enabled": True}
+    )
+    tool_result = ToolResult(
+        "echo_security_tool", "ecu.c", "success", error=None
+    )
+    state = InvestigationState(
+        "Assess ECU",
+        "ecu.c",
+        (
+            InvestigationStep(
+                1,
+                action,
+                "VALID",
+                True,
+                tool_result,
+                finding_context,
+                assessment,
+            ),
+        ),
+    )
+    result = InvestigationRunResult(
+        state, InvestigationTerminationReason.MAX_STEPS_REACHED
+    )
+
+    report = build_investigation_report(result)
+    step = report.steps[0]
+
+    assert report.total_steps == 1
+    assert step == InvestigationStepReport(
+        step_number=1,
+        proposed_tool="echo_security_tool",
+        proposed_target="ecu.c",
+        proposed_parameters={"message_rate": 100, "enabled": True},
+        validation_allowed=True,
+        validation_status="VALID",
+        tool_status="success",
+        tool_error=None,
+        deterministic_finding=InvestigationFindingReport(
+            rule_id="RULE-10A",
+            message="Observed issue",
+            severity="HIGH",
+            category="automotive-security",
+            cwe="CWE-20",
+            source_tool="test-tool",
+        ),
+        ai_assessment=InvestigationAssessmentReport(
+            classification="confirmed_vulnerability",
+            confidence="high",
+            rationale="Evidence supports review.",
+            impact="Potential security impact.",
+            recommendations=("Review the protected path.",),
+        ),
+    )
+    assert state.steps[0].assessment is assessment
+
+
+def test_investigation_report_parameters_are_recursive_immutable_snapshots():
+    parameters = {
+        "mode": "demo",
+        "nested": {"values": [1, {"enabled": True}]},
+    }
+    action = AgentAction("echo_security_tool", "ecu.c", parameters)
+    state = InvestigationState(
+        "Assess ECU",
+        "ecu.c",
+        (InvestigationStep(1, action, "VALID", True),),
+    )
+
+    report = build_investigation_report(
+        InvestigationRunResult(state, InvestigationTerminationReason.MAX_STEPS_REACHED)
+    )
+    snapshot = report.steps[0].proposed_parameters
+
+    with pytest.raises(TypeError):
+        snapshot["mode"] = "changed"
+    with pytest.raises(TypeError):
+        snapshot["nested"]["values"][1]["enabled"] = False
+
+    parameters["mode"] = "changed"
+    parameters["nested"]["values"].append("later")
+    parameters["nested"]["values"][1]["enabled"] = False
+
+    assert snapshot["mode"] == "demo"
+    assert snapshot["nested"]["values"] == (1, {"enabled": True})
+    assert action.parameters["mode"] == "changed"
+
+    serialized = json.loads(format_investigation_report_json(report))
+    assert serialized["steps"][0]["proposed_parameters"] == {
+        "mode": "demo",
+        "nested": {"values": [1, {"enabled": True}]},
+    }
+    terminal = format_investigation_report(report)
+    assert 'Parameters: {"mode": "demo", "nested": {"values": [1, {"enabled": true}]}}' in terminal
+
+
+def test_investigation_report_builder_preserves_rejected_and_error_steps():
+    steps = (
+        InvestigationStep(
+            1,
+            AgentAction("restricted_tool", "ecu.c", {"attempt": 1}),
+            "UNAUTHORIZED_TOOL",
+            False,
+        ),
+        InvestigationStep(
+            2,
+            AgentAction("echo_security_tool", "ecu.c"),
+            "VALID",
+            True,
+            ToolResult("echo_security_tool", "ecu.c", "error", error="failed"),
+        ),
+    )
+    result = InvestigationRunResult(
+        InvestigationState("Assess ECU", "ecu.c", steps),
+        InvestigationTerminationReason.TOOL_ERROR,
+    )
+
+    report = build_investigation_report(result)
+
+    assert report.termination_reason is InvestigationTerminationReason.TOOL_ERROR
+    assert report.steps[0].validation_allowed is False
+    assert report.steps[0].tool_status is None
+    assert report.steps[1].tool_status == "error"
+    assert report.steps[1].tool_error == "failed"
+
+
+def test_investigation_report_json_is_stable_and_keeps_finding_distinct():
+    state = InvestigationState(
+        "Assess ECU",
+        "ecu.c",
+        (
+            InvestigationStep(
+                1,
+                _investigation_action(),
+                "VALID",
+                True,
+                finding_context=_investigation_finding_context(),
+                assessment=_investigation_assessment(),
+            ),
+        ),
+    )
+    report = build_investigation_report(
+        InvestigationRunResult(state, InvestigationTerminationReason.MAX_STEPS_REACHED)
+    )
+
+    serialized = format_investigation_report_json(report)
+    payload = json.loads(serialized)
+
+    assert serialized == format_investigation_report_json(report)
+    assert payload["termination_reason"] == "MAX_STEPS_REACHED"
+    assert payload["steps"][0]["deterministic_finding"]["rule_id"] == "RULE-10A"
+    assert payload["steps"][0]["ai_assessment"]["classification"] == "confirmed_vulnerability"
+    assert "FindingAssessment(" not in serialized
+    assert "FindingContext(" not in serialized
+
+
+def test_investigation_terminal_formatter_sanitizes_hostile_control_sequences():
+    hostile = "\x1b[31mFAKE CRITICAL\x1b[0m\x00"
+    finding = SecurityFinding(
+        "RULE-HOSTILE",
+        hostile,
+        "HIGH",
+        "ecu.c",
+        1,
+        "security",
+        "CWE-20",
+        "test-tool",
+    )
+    context = FindingContext(
+        finding=finding,
+        evidence=(
+            NormalizedEvidence(
+                "binary",
+                "test-tool",
+                hostile,
+                (hostile,),
+            ),
+        ),
+    )
+    state = InvestigationState(
+        hostile,
+        hostile,
+        (
+            InvestigationStep(
+                1,
+                AgentAction("echo_security_tool", hostile, {"note": hostile}),
+                "VALID",
+                True,
+                ToolResult("echo_security_tool", hostile, "success"),
+                context,
+                FindingAssessment(
+                    "needs_review", "low", hostile, hostile, [hostile]
+                ),
+            ),
+        ),
+    )
+    report = build_investigation_report(
+        InvestigationRunResult(state, InvestigationTerminationReason.MAX_STEPS_REACHED)
+    )
+
+    terminal = format_investigation_report(report)
+    serialized = format_investigation_report_json(report)
+
+    assert "\x1b" not in terminal
+    assert "FAKE CRITICAL" in terminal
+    assert "\\u001b[31mFAKE CRITICAL" in serialized
+    assert json.loads(serialized)["objective"] == hostile
+
+
+def test_cli_report_demo_supports_text_and_json(capsys):
+    assert cli_main(["report-demo"]) == 0
+    text = capsys.readouterr().out
+    assert "SIMULATED / CONTROLLED DEMONSTRATION" in text
+    assert "AUTOSEC-AI SECURITY INVESTIGATION" in text
+    assert "REJECTED" in text
+
+    assert cli_main(["report-demo", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["termination_reason"] == "ACTION_REJECTED"
 
 
 def test_openai_client_uses_environment_model(monkeypatch):

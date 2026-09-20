@@ -9,6 +9,8 @@ class ToolRegistry:
 
     def register(self, tool: SecurityTool) -> None:
         """Register a security tool by its unique name."""
+        if not isinstance(tool, SecurityTool):
+            raise TypeError("tool must be a SecurityTool")
         if tool.name in self._tools:
             raise ValueError(f"Tool already registered: {tool.name}")
 

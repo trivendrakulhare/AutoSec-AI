@@ -2871,6 +2871,11 @@ def test_tool_registry_rejects_duplicate_tool_names():
     with pytest.raises(ValueError):
         registry.register(second_tool)
 
+
+def test_tool_registry_rejects_non_security_tools():
+    with pytest.raises(TypeError, match="SecurityTool"):
+        ToolRegistry().register(object())
+
 def test_agent_action():
     action = AgentAction(
         tool_name="echo_security_tool",

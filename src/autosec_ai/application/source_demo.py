@@ -57,7 +57,6 @@ def build_source_security_demo(
     planner_client: LLMClient | None = None,
     assessor_client: LLMClient | None = None,
     target: str = DEFAULT_SOURCE_TARGET,
-    rule_pack: str = DEFAULT_RULE_PACK,
     executable: str = "semgrep",
 ) -> BoundedInvestigationRunner:
     """Assemble the controlled source investigation without running it."""
@@ -75,7 +74,7 @@ def build_source_security_demo(
     planner_client = planner_client or MockLLMClient(
         f"tool_name={SOURCE_TOOL_NAME}\n"
         f"target={target}\n"
-        f'parameters={{"rule_pack": "{rule_pack}"}}'
+        f'parameters={{"rule_pack": "{DEFAULT_RULE_PACK}"}}'
     )
     assessor_client = assessor_client or MockLLMClient(
         '{"classification":"needs_review","confidence":"medium",'

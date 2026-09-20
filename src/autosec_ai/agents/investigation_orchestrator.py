@@ -34,7 +34,11 @@ class InvestigationOrchestrator:
         self.finding_assessor = finding_assessor
 
     def advance(self, state: InvestigationState) -> InvestigationState:
-        """Propose, validate, and optionally execute exactly one action."""
+        """Propose, validate, and optionally execute exactly one action.
+
+        ToolResult statuses determine bounded TOOL_ERROR termination; runtime
+        exceptions from execution or post-processing intentionally propagate.
+        """
         if not isinstance(state, InvestigationState):
             raise TypeError("state must be an InvestigationState")
 

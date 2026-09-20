@@ -1,5 +1,6 @@
 import argparse
 
+from autosec_ai.application.source_demo import run_source_security_demo
 from autosec_ai.agents.action import AgentAction
 from autosec_ai.agents.bounded_investigation import (
     InvestigationRunResult,
@@ -51,6 +52,15 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit deterministic JSON instead of terminal text",
     )
+    source_demo = subparsers.add_parser(
+        "source-demo",
+        help="run the controlled automotive source investigation",
+    )
+    source_demo.add_argument(
+        "--json",
+        action="store_true",
+        help="emit deterministic JSON instead of terminal text",
+    )
     return parser
 
 
@@ -62,6 +72,15 @@ def main(argv: list[str] | None = None) -> int:
             print(format_investigation_report_json(report))
         else:
             print("SIMULATED / CONTROLLED DEMONSTRATION")
+            print(format_investigation_report(report))
+        return 0
+    if args.command == "source-demo":
+        result = run_source_security_demo()
+        report = build_investigation_report(result)
+        if args.json:
+            print(format_investigation_report_json(report))
+        else:
+            print("SIMULATED / CONTROLLED AUTOMOTIVE SECURITY DEMONSTRATION")
             print(format_investigation_report(report))
         return 0
     build_parser().print_help()
